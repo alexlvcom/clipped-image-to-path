@@ -35,6 +35,9 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
     private const int DebounceMs = 300;
     private const int ClipboardRetryCount = 8;
     private const int ClipboardRetryDelayMs = 40;
+    private const int DeferredRetryIntervalMs = 150;
+    private const int DeferredRetryMaxAttempts = 12;
+    private const int ClipboardInjectDelayMs = 500;
     private static readonly int KeepLatestN = 500;
     private static readonly bool WriteLog = true;
 
@@ -42,11 +45,16 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
     private DateTime _lastHandledUtc = DateTime.MinValue;
     private string? _lastImageSha256;
     private bool _isHandling;
+    private int _deferredAttemptsRemaining;
 
     private readonly AppSettings _settings;
     private readonly ClipboardListenerWindow _listenerWindow;
     private readonly NotifyIcon _notifyIcon;
     private readonly Icon _trayIcon;
+    private readonly System.Windows.Forms.Timer _deferredProcessTimer;
+    private readonly System.Windows.Forms.Timer _clipboardInjectTimer;
+    private string? _pendingClipboardText;
+    private Bitmap? _pendingClipboardImage;
 
     internal ClipboardBridgeContext()
     {
@@ -61,6 +69,18 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             Visible = true,
             ContextMenuStrip = BuildMenu(),
         };
+
+        _deferredProcessTimer = new System.Windows.Forms.Timer
+        {
+            Interval = DeferredRetryIntervalMs,
+        };
+        _deferredProcessTimer.Tick += (_, _) => OnDeferredRetryTick();
+
+        _clipboardInjectTimer = new System.Windows.Forms.Timer
+        {
+            Interval = ClipboardInjectDelayMs,
+        };
+        _clipboardInjectTimer.Tick += (_, _) => OnClipboardInjectTick();
 
         _listenerWindow = new ClipboardListenerWindow(HandleClipboardUpdate);
         Log("started");
@@ -78,6 +98,11 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         if (disposing)
         {
             _listenerWindow.Dispose();
+            _deferredProcessTimer.Stop();
+            _deferredProcessTimer.Dispose();
+            _clipboardInjectTimer.Stop();
+            _clipboardInjectTimer.Dispose();
+            _pendingClipboardImage?.Dispose();
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();
             _trayIcon.Dispose();
@@ -269,6 +294,8 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
 
     private void HandleClipboardUpdate()
     {
+        MaybeCancelPendingClipboardInject();
+
         if (_isHandling)
         {
             return;
@@ -296,8 +323,14 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             using var image = TryGetClipboardImage();
             if (image is null)
             {
+                if (!TryClipboardHasText())
+                {
+                    StartDeferredRetry();
+                }
                 return;
             }
+
+            StopDeferredRetry();
 
             var pngBytes = EncodePng(image);
             var imageHash = ComputeSha256Hex(pngBytes);
@@ -319,10 +352,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
                 ? ConvertWindowsPathToWsl(filePath)
                 : filePath;
             var quotedPath = QuoteForClipboard(clipboardPath);
-            if (!TrySetClipboardText(quotedPath))
-            {
-                throw new IOException("Unable to set clipboard text after retries.");
-            }
+            ScheduleClipboardInject(quotedPath, image);
 
             _lastImageSha256 = imageHash;
 
@@ -336,6 +366,195 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         finally
         {
             _isHandling = false;
+        }
+    }
+
+    private void OnDeferredRetryTick()
+    {
+        if (_deferredAttemptsRemaining <= 0)
+        {
+            StopDeferredRetry();
+            return;
+        }
+
+        _deferredAttemptsRemaining--;
+        HandleClipboardUpdateIgnoringDebounce();
+    }
+
+    private void HandleClipboardUpdateIgnoringDebounce()
+    {
+        if (_isHandling)
+        {
+            return;
+        }
+
+        _isHandling = true;
+        try
+        {
+            EnsureOutputDirectoryExists();
+            var outputDirectory = _settings.OutputDirectory;
+
+            var existingText = TryGetClipboardText();
+            if (IsOwnOutputPathText(existingText, outputDirectory))
+            {
+                StopDeferredRetry();
+                return;
+            }
+
+            using var image = TryGetClipboardImage();
+            if (image is null)
+            {
+                if (_deferredAttemptsRemaining <= 0)
+                {
+                    StopDeferredRetry();
+                }
+                return;
+            }
+
+            StopDeferredRetry();
+
+            var pngBytes = EncodePng(image);
+            var imageHash = ComputeSha256Hex(pngBytes);
+            if (_lastImageSha256 == imageHash)
+            {
+                return;
+            }
+
+            var filePath = BuildUniqueFilePath(outputDirectory);
+            File.WriteAllBytes(filePath, pngBytes);
+
+            var info = new FileInfo(filePath);
+            if (!info.Exists || info.Length == 0)
+            {
+                throw new IOException($"Saved file is missing or empty: {filePath}");
+            }
+
+            var clipboardPath = _settings.ConvertToWslPath
+                ? ConvertWindowsPathToWsl(filePath)
+                : filePath;
+            var quotedPath = QuoteForClipboard(clipboardPath);
+            ScheduleClipboardInject(quotedPath, image);
+
+            _lastImageSha256 = imageHash;
+            CleanupOldFilesIfNeeded(outputDirectory);
+            Log($"saved {filePath}");
+        }
+        catch (Exception ex)
+        {
+            Log($"error {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            _isHandling = false;
+        }
+    }
+
+    private void StartDeferredRetry()
+    {
+        if (_deferredAttemptsRemaining < DeferredRetryMaxAttempts)
+        {
+            _deferredAttemptsRemaining = DeferredRetryMaxAttempts;
+        }
+
+        if (!_deferredProcessTimer.Enabled)
+        {
+            _deferredProcessTimer.Start();
+        }
+    }
+
+    private void StopDeferredRetry()
+    {
+        _deferredAttemptsRemaining = 0;
+        if (_deferredProcessTimer.Enabled)
+        {
+            _deferredProcessTimer.Stop();
+        }
+    }
+
+    private void ScheduleClipboardInject(string text, Image image)
+    {
+        _pendingClipboardImage?.Dispose();
+        _pendingClipboardImage = new Bitmap(image);
+        _pendingClipboardText = text;
+        _clipboardInjectTimer.Stop();
+        _clipboardInjectTimer.Start();
+    }
+
+    private void CancelPendingClipboardInject()
+    {
+        _clipboardInjectTimer.Stop();
+        _pendingClipboardImage?.Dispose();
+        _pendingClipboardImage = null;
+        _pendingClipboardText = null;
+    }
+
+    private void MaybeCancelPendingClipboardInject()
+    {
+        if (_pendingClipboardImage is null || string.IsNullOrWhiteSpace(_pendingClipboardText))
+        {
+            return;
+        }
+
+        try
+        {
+            if (Clipboard.ContainsImage())
+            {
+                return;
+            }
+
+            var text = TryGetClipboardText();
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return;
+            }
+
+            if (IsOwnOutputPathText(text, _settings.OutputDirectory))
+            {
+                return;
+            }
+
+            // Clipboard changed to other text content before delayed injection fired.
+            CancelPendingClipboardInject();
+        }
+        catch (ExternalException)
+        {
+            // Keep pending state and try again on next update.
+        }
+    }
+
+    private void OnClipboardInjectTick()
+    {
+        _clipboardInjectTimer.Stop();
+
+        if (_pendingClipboardImage is null || string.IsNullOrWhiteSpace(_pendingClipboardText))
+        {
+            return;
+        }
+
+        try
+        {
+            if (!TrySetClipboardContent(_pendingClipboardText, _pendingClipboardImage))
+            {
+                Log("error IOException: delayed clipboard injection failed");
+            }
+        }
+        finally
+        {
+            _pendingClipboardImage.Dispose();
+            _pendingClipboardImage = null;
+            _pendingClipboardText = null;
+        }
+    }
+
+    private static bool TryClipboardHasText()
+    {
+        try
+        {
+            return Clipboard.ContainsText();
+        }
+        catch (ExternalException)
+        {
+            return false;
         }
     }
 
@@ -460,13 +679,22 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         return null;
     }
 
-    private static bool TrySetClipboardText(string text)
+    private static bool TrySetClipboardContent(string text, Image image)
     {
         for (var i = 0; i < ClipboardRetryCount; i++)
         {
             try
             {
-                Clipboard.SetText(text);
+                // Keep image data so clipboard managers can still treat this as an image clip,
+                // and add text so terminals paste the saved file path.
+                var data = new DataObject();
+                data.SetText(text, TextDataFormat.UnicodeText);
+                data.SetText(text, TextDataFormat.Text);
+
+                using var bmp = new Bitmap(image);
+                data.SetImage(bmp);
+
+                Clipboard.SetDataObject(data, true);
                 return true;
             }
             catch (ExternalException)

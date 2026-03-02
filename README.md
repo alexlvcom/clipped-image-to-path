@@ -84,9 +84,14 @@ A runtime log is written to:
 
 ## Notes
 
-- Works with or without Ditto.
-- Designed to coexist with Ditto.
+- Works standalone; no clipboard manager is required.
+- Clipboard managers (for example, Ditto) are optional and can be used alongside this app.
 - If output path has spaces, quoted clipboard text prevents CLI parsing issues.
+- In clipboard managers, you may see two entries for one screenshot:
+  - the original image clip from your screenshot tool
+  - the path-injection clip written by ClippedImageToPath
+- This is expected because the app performs a second clipboard write so Terminal can paste the file path.
+- If you want to hide the app-generated entry, add `ClippedImageToPath.exe` to your clipboard manager's ignore-app list.
 
 ## Troubleshooting
 
