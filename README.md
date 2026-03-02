@@ -1,0 +1,99 @@
+# ClippedImageToPath
+
+ClippedImageToPath is a lightweight Windows tray app that converts copied clipboard images into PNG files and replaces the clipboard with the saved file path as text.
+
+This solves the common issue where Windows Terminal cannot paste bitmap clipboard formats directly into CLI tools.
+
+## What It Does
+
+- Watches clipboard updates in the background
+- Detects image content (screenshots, snips, browser images, etc.)
+- Saves image as PNG with timestamp name:
+  - `clipboard_yyyy-MM-dd_HH-mm-ss_fff.png`
+- Replaces clipboard with quoted path text
+  - Windows mode: `"C:\\...\\clipboard_....png"`
+  - Optional WSL mode: `"/mnt/c/.../clipboard_....png"`
+- Leaves normal text clipboard entries unchanged
+- Includes loop-prevention, debounce, retry logic, and dedupe hashing
+
+## Project Layout
+
+- `Program.cs` - app logic, tray UI, settings, clipboard listener
+- `ClippedImageToPath.csproj` - project metadata and version
+
+## Build
+
+```powershell
+dotnet build -c Release
+```
+
+## Publish (single-file)
+
+```powershell
+dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true
+```
+
+Published executable:
+
+- `bin\\Release\\net8.0-windows\\win-x64\\publish\\ClippedImageToPath.exe`
+
+## Run
+
+Launch the EXE. The app runs in the system tray.
+
+Tray menu:
+
+- `Open output folder`
+- `Settings`
+- `About`
+- `Exit`
+
+## Settings
+
+`Settings` dialog allows:
+
+- Output folder for saved PNG files
+- Toggle `Convert clipboard path to WSL format (/mnt/c/...)`
+
+Settings are stored at:
+
+- `%APPDATA%\\ClippedImageToPath\\settings.json`
+
+## About Dialog
+
+Shows:
+
+- App name
+- Version
+- Output folder
+- Build date
+- Copyright
+
+## Logging
+
+A runtime log is written to:
+
+- `<OutputFolder>\\bridge.log`
+
+## Typical Workflow
+
+1. Copy image (Snipping Tool, browser, screenshot).
+2. App saves PNG file.
+3. Clipboard becomes quoted file path text.
+4. Paste into Windows Terminal / CLI tool.
+
+## Notes
+
+- Works with or without Ditto.
+- Designed to coexist with Ditto.
+- If output path has spaces, quoted clipboard text prevents CLI parsing issues.
+
+## Troubleshooting
+
+- If nothing happens:
+  - Ensure app is running in tray.
+  - Check `<OutputFolder>\\bridge.log`.
+- If clipboard is busy:
+  - App retries clipboard access automatically.
+- If path format is unexpected:
+  - Check `Settings` for WSL conversion toggle.
