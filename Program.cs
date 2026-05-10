@@ -38,6 +38,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
     private const int DeferredRetryIntervalMs = 150;
     private const int DeferredRetryMaxAttempts = 12;
     private const int ClipboardInjectDelayMs = 500;
+    private const int SelfInjectIgnoreWindowMs = 3000;
     private static readonly int KeepLatestN = 500;
     private static readonly bool WriteLog = true;
 
@@ -55,6 +56,9 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
     private readonly System.Windows.Forms.Timer _clipboardInjectTimer;
     private string? _pendingClipboardText;
     private Bitmap? _pendingClipboardImage;
+    private string? _lastInjectedClipboardText;
+    private string? _lastInjectedImageSha256;
+    private DateTime _lastInjectedUtc = DateTime.MinValue;
 
     internal ClipboardBridgeContext()
     {
@@ -315,6 +319,11 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             var outputDirectory = _settings.OutputDirectory;
 
             var existingText = TryGetClipboardText();
+            if (IsRecentOwnInjectedClipboardText(existingText))
+            {
+                return;
+            }
+
             if (IsOwnOutputPathText(existingText, outputDirectory))
             {
                 return;
@@ -334,7 +343,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
 
             var pngBytes = EncodePng(image);
             var imageHash = ComputeSha256Hex(pngBytes);
-            if (_lastImageSha256 == imageHash)
+            if (_lastImageSha256 == imageHash || IsRecentOwnInjectedImageHash(imageHash))
             {
                 return;
             }
@@ -395,6 +404,12 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             var outputDirectory = _settings.OutputDirectory;
 
             var existingText = TryGetClipboardText();
+            if (IsRecentOwnInjectedClipboardText(existingText))
+            {
+                StopDeferredRetry();
+                return;
+            }
+
             if (IsOwnOutputPathText(existingText, outputDirectory))
             {
                 StopDeferredRetry();
@@ -415,7 +430,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
 
             var pngBytes = EncodePng(image);
             var imageHash = ComputeSha256Hex(pngBytes);
-            if (_lastImageSha256 == imageHash)
+            if (_lastImageSha256 == imageHash || IsRecentOwnInjectedImageHash(imageHash))
             {
                 return;
             }
@@ -473,6 +488,10 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
 
     private void ScheduleClipboardInject(string text, Image image)
     {
+        _lastInjectedClipboardText = text;
+        _lastInjectedImageSha256 = ComputeSha256Hex(EncodePng(image));
+        _lastInjectedUtc = DateTime.UtcNow;
+
         _pendingClipboardImage?.Dispose();
         _pendingClipboardImage = new Bitmap(image);
         _pendingClipboardText = text;
@@ -520,6 +539,36 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         {
             // Keep pending state and try again on next update.
         }
+    }
+
+    private bool IsRecentOwnInjectedClipboardText(string? text)
+    {
+        if ((DateTime.UtcNow - _lastInjectedUtc).TotalMilliseconds > SelfInjectIgnoreWindowMs)
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(_lastInjectedClipboardText))
+        {
+            return false;
+        }
+
+        return string.Equals(text.Trim(), _lastInjectedClipboardText, StringComparison.Ordinal);
+    }
+
+    private bool IsRecentOwnInjectedImageHash(string imageHash)
+    {
+        if ((DateTime.UtcNow - _lastInjectedUtc).TotalMilliseconds > SelfInjectIgnoreWindowMs)
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(_lastInjectedImageSha256))
+        {
+            return false;
+        }
+
+        return string.Equals(imageHash, _lastInjectedImageSha256, StringComparison.Ordinal);
     }
 
     private void OnClipboardInjectTick()
