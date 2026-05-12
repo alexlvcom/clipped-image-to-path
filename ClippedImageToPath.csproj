@@ -8,9 +8,12 @@
     <AssemblyName>ClippedImageToPath</AssemblyName>
     <RootNamespace>ClippedImageToPath</RootNamespace>
     <Product>ClippedImageToPath</Product>
-    <Version>1.0.0</Version>
-    <FileVersion>1.0.0.0</FileVersion>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <InformationalVersion>1.0.0</InformationalVersion>
+    <Version>1.1.0</Version>
+    <FileVersion>1.1.0.0</FileVersion>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <InformationalVersion>1.1.0</InformationalVersion>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="SSH.NET" Version="2024.2.0" />
+  </ItemGroup>
 </Project>

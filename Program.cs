@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Windows.Forms;
+using Renci.SshNet;
 
 internal static class Program
 {
@@ -49,23 +50,30 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
     private int _deferredAttemptsRemaining;
 
     private readonly AppSettings _settings;
+    private readonly SynchronizationContext _uiContext;
     private readonly ClipboardListenerWindow _listenerWindow;
     private readonly NotifyIcon _notifyIcon;
     private readonly Icon _trayIcon;
+    private readonly Icon _uploadingTrayIcon;
     private readonly System.Windows.Forms.Timer _deferredProcessTimer;
     private readonly System.Windows.Forms.Timer _clipboardInjectTimer;
+    private readonly System.Windows.Forms.Timer _uploadStatusTimer;
     private string? _pendingClipboardText;
     private Bitmap? _pendingClipboardImage;
     private string? _lastInjectedClipboardText;
     private string? _lastInjectedImageSha256;
     private DateTime _lastInjectedUtc = DateTime.MinValue;
+    private int _activeUploadCount;
+    private DateTime _uploadStartedUtc;
 
     internal ClipboardBridgeContext()
     {
+        _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _settings = AppSettings.Load();
         EnsureOutputDirectoryExists();
 
-        _trayIcon = TrayIconFactory.Create();
+        _trayIcon = TrayIconFactory.CreateNormal();
+        _uploadingTrayIcon = TrayIconFactory.CreateUploading();
         _notifyIcon = new NotifyIcon
         {
             Icon = _trayIcon,
@@ -85,6 +93,12 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             Interval = ClipboardInjectDelayMs,
         };
         _clipboardInjectTimer.Tick += (_, _) => OnClipboardInjectTick();
+
+        _uploadStatusTimer = new System.Windows.Forms.Timer
+        {
+            Interval = 100,
+        };
+        _uploadStatusTimer.Tick += (_, _) => UpdateUploadTrayStatus();
 
         _listenerWindow = new ClipboardListenerWindow(HandleClipboardUpdate);
         Log("started");
@@ -106,10 +120,13 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             _deferredProcessTimer.Dispose();
             _clipboardInjectTimer.Stop();
             _clipboardInjectTimer.Dispose();
+            _uploadStatusTimer.Stop();
+            _uploadStatusTimer.Dispose();
             _pendingClipboardImage?.Dispose();
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();
             _trayIcon.Dispose();
+            _uploadingTrayIcon.Dispose();
         }
 
         base.Dispose(disposing);
@@ -150,7 +167,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             MaximizeBox = false,
             MinimizeBox = false,
             ShowInTaskbar = false,
-            ClientSize = new Size(620, 190),
+            ClientSize = new Size(620, 245),
         };
 
         var folderLabel = new Label
@@ -195,11 +212,27 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             Checked = _settings.ConvertToWslPath,
         };
 
+        var uploadCheck = new CheckBox
+        {
+            Text = "Remote upload enabled",
+            AutoSize = true,
+            Location = new Point(16, 116),
+            Checked = _settings.RemoteUploadEnabled,
+        };
+
+        var sshButton = new Button
+        {
+            Text = "SSH credentials...",
+            Location = new Point(16, 150),
+            Size = new Size(130, 30),
+        };
+        sshButton.Click += (_, _) => ShowSshSettingsDialog(settingsForm);
+
         var saveButton = new Button
         {
             Text = "Save",
             DialogResult = DialogResult.OK,
-            Location = new Point(440, 140),
+            Location = new Point(440, 195),
             Size = new Size(80, 30),
         };
 
@@ -207,7 +240,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         {
             Text = "Cancel",
             DialogResult = DialogResult.Cancel,
-            Location = new Point(525, 140),
+            Location = new Point(525, 195),
             Size = new Size(80, 30),
         };
 
@@ -215,6 +248,8 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         settingsForm.Controls.Add(folderText);
         settingsForm.Controls.Add(browseButton);
         settingsForm.Controls.Add(wslCheck);
+        settingsForm.Controls.Add(uploadCheck);
+        settingsForm.Controls.Add(sshButton);
         settingsForm.Controls.Add(saveButton);
         settingsForm.Controls.Add(cancelButton);
         settingsForm.AcceptButton = saveButton;
@@ -238,6 +273,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             Directory.CreateDirectory(fullFolder);
             _settings.OutputDirectory = fullFolder;
             _settings.ConvertToWslPath = wslCheck.Checked;
+            _settings.RemoteUploadEnabled = uploadCheck.Checked;
             _settings.Save();
             Log("settings updated");
         }
@@ -245,6 +281,173 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         {
             MessageBox.Show($"Failed to save settings: {ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    private void ShowSshSettingsDialog(IWin32Window owner)
+    {
+        using var sshForm = new Form
+        {
+            Text = "SSH Credentials",
+            StartPosition = FormStartPosition.CenterParent,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            ShowInTaskbar = false,
+            ClientSize = new Size(460, 270),
+        };
+
+        var hostText = AddLabeledTextBox(sshForm, "Host:", _settings.SshHost, 16, false);
+        var portText = AddLabeledTextBox(sshForm, "Port:", _settings.SshPort.ToString(), 58, false);
+        var userText = AddLabeledTextBox(sshForm, "User:", _settings.SshUser, 100, false);
+        var passwordText = AddLabeledTextBox(sshForm, "Password:", _settings.GetSshPassword(), 142, true);
+        var remoteDirectoryText = AddLabeledTextBox(sshForm, "Remote directory:", _settings.RemoteDirectory, 184, false);
+
+        var testButton = new Button
+        {
+            Text = "Test connection",
+            Location = new Point(16, 226),
+            Size = new Size(120, 30),
+        };
+
+        var saveButton = new Button
+        {
+            Text = "Save",
+            DialogResult = DialogResult.OK,
+            Location = new Point(275, 226),
+            Size = new Size(80, 30),
+        };
+
+        var cancelButton = new Button
+        {
+            Text = "Cancel",
+            DialogResult = DialogResult.Cancel,
+            Location = new Point(365, 226),
+            Size = new Size(80, 30),
+        };
+
+        testButton.Click += async (_, _) =>
+        {
+            if (!TryReadSshDialogValues(hostText, portText, userText, passwordText, remoteDirectoryText, out var config, out var error))
+            {
+                MessageBox.Show(error, AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            testButton.Enabled = false;
+            testButton.Text = "Testing...";
+            try
+            {
+                await Task.Run(() => RemoteUploader.TestConnection(config));
+                MessageBox.Show("SSH connection and remote directory are available.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"SSH test failed: {ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                testButton.Text = "Test connection";
+                testButton.Enabled = true;
+            }
+        };
+
+        sshForm.Controls.Add(testButton);
+        sshForm.Controls.Add(saveButton);
+        sshForm.Controls.Add(cancelButton);
+        sshForm.AcceptButton = saveButton;
+        sshForm.CancelButton = cancelButton;
+
+        if (sshForm.ShowDialog(owner) != DialogResult.OK)
+        {
+            return;
+        }
+
+        if (!TryReadSshDialogValues(hostText, portText, userText, passwordText, remoteDirectoryText, out var sshConfig, out var validationError))
+        {
+            MessageBox.Show(validationError, AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        _settings.SshHost = sshConfig.Host;
+        _settings.SshPort = sshConfig.Port;
+        _settings.SshUser = sshConfig.User;
+        _settings.SetSshPassword(sshConfig.Password);
+        _settings.RemoteDirectory = sshConfig.RemoteDirectory;
+        _settings.Save();
+        Log("ssh settings updated");
+    }
+
+    private static TextBox AddLabeledTextBox(Form form, string labelText, string value, int y, bool usePasswordChar)
+    {
+        var label = new Label
+        {
+            Text = labelText,
+            AutoSize = true,
+            Location = new Point(16, y + 4),
+        };
+
+        var textBox = new TextBox
+        {
+            Text = value,
+            Location = new Point(140, y),
+            Size = new Size(305, 26),
+            UseSystemPasswordChar = usePasswordChar,
+        };
+
+        form.Controls.Add(label);
+        form.Controls.Add(textBox);
+        return textBox;
+    }
+
+    private static bool TryReadSshDialogValues(
+        TextBox hostText,
+        TextBox portText,
+        TextBox userText,
+        TextBox passwordText,
+        TextBox remoteDirectoryText,
+        out RemoteUploadConfig config,
+        out string error)
+    {
+        config = default;
+        error = string.Empty;
+
+        var host = hostText.Text.Trim();
+        var user = userText.Text.Trim();
+        var password = passwordText.Text;
+        var remoteDirectory = remoteDirectoryText.Text.Trim();
+
+        if (string.IsNullOrWhiteSpace(host))
+        {
+            error = "Host cannot be empty.";
+            return false;
+        }
+
+        if (!int.TryParse(portText.Text.Trim(), out var port) || port <= 0 || port > 65535)
+        {
+            error = "Port must be a number from 1 to 65535.";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(user))
+        {
+            error = "User cannot be empty.";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(password))
+        {
+            error = "Password cannot be empty.";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(remoteDirectory))
+        {
+            error = "Remote directory cannot be empty.";
+            return false;
+        }
+
+        config = new RemoteUploadConfig(host, port, user, password, remoteDirectory);
+        return true;
     }
 
     private void ShowAboutDialog()
@@ -262,12 +465,13 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             MaximizeBox = false,
             MinimizeBox = false,
             ShowInTaskbar = false,
-            ClientSize = new Size(480, 190),
+            ClientSize = new Size(560, 215),
         };
 
         var body =
             $"{AppName}\r\n" +
             $"Version: {version}\r\n" +
+            $"Build summary: Added optional SSH/SFTP screenshot upload with connection testing.\r\n" +
             $"Output folder: {_settings.OutputDirectory}\r\n" +
             $"Build date: {File.GetLastWriteTime(Application.ExecutablePath):yyyy-MM-dd HH:mm:ss}\r\n" +
             $"Copyright (c) Alex LV";
@@ -367,6 +571,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
 
             CleanupOldFilesIfNeeded(outputDirectory);
             Log($"saved {filePath}");
+            QueueRemoteUploadIfEnabled(filePath);
         }
         catch (Exception ex)
         {
@@ -453,6 +658,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             _lastImageSha256 = imageHash;
             CleanupOldFilesIfNeeded(outputDirectory);
             Log($"saved {filePath}");
+            QueueRemoteUploadIfEnabled(filePath);
         }
         catch (Exception ex)
         {
@@ -484,6 +690,84 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         {
             _deferredProcessTimer.Stop();
         }
+    }
+
+    private void QueueRemoteUploadIfEnabled(string filePath)
+    {
+        if (!_settings.RemoteUploadEnabled)
+        {
+            return;
+        }
+
+        if (!_settings.TryGetRemoteUploadConfig(out var config, out var error))
+        {
+            Log($"upload skipped: {error}");
+            return;
+        }
+
+        BeginUploadStatus();
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                var remotePath = RemoteUploader.UploadFile(filePath, config);
+                Log($"uploaded {filePath} -> {remotePath}");
+            }
+            catch (Exception ex)
+            {
+                Log($"upload error {ex.GetType().Name}: {ex.Message}");
+            }
+            finally
+            {
+                FinishUploadStatus();
+            }
+        });
+    }
+
+    private void BeginUploadStatus()
+    {
+        _uiContext.Post(_ =>
+        {
+            _activeUploadCount++;
+            if (_activeUploadCount == 1)
+            {
+                _uploadStartedUtc = DateTime.UtcNow;
+                _notifyIcon.Icon = _uploadingTrayIcon;
+                _uploadStatusTimer.Start();
+            }
+
+            UpdateUploadTrayStatus();
+        }, null);
+    }
+
+    private void FinishUploadStatus()
+    {
+        _uiContext.Post(_ =>
+        {
+            if (_activeUploadCount > 0)
+            {
+                _activeUploadCount--;
+            }
+
+            if (_activeUploadCount == 0)
+            {
+                _uploadStatusTimer.Stop();
+                _notifyIcon.Icon = _trayIcon;
+                _notifyIcon.Text = AppName;
+            }
+        }, null);
+    }
+
+    private void UpdateUploadTrayStatus()
+    {
+        if (_activeUploadCount <= 0)
+        {
+            return;
+        }
+
+        var elapsed = DateTime.UtcNow - _uploadStartedUtc;
+        var text = $"{AppName} uploading {elapsed.TotalSeconds:0.0}s";
+        _notifyIcon.Text = text.Length <= 63 ? text : text[..63];
     }
 
     private void ScheduleClipboardInject(string text, Image image)
@@ -818,6 +1102,18 @@ internal sealed class AppSettings
 
     public bool ConvertToWslPath { get; set; }
 
+    public bool RemoteUploadEnabled { get; set; }
+
+    public string SshHost { get; set; } = string.Empty;
+
+    public int SshPort { get; set; } = 22;
+
+    public string SshUser { get; set; } = string.Empty;
+
+    public string SshPasswordBase64 { get; set; } = string.Empty;
+
+    public string RemoteDirectory { get; set; } = ".";
+
     private static string SettingsDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "ClippedImageToPath");
@@ -841,6 +1137,16 @@ internal sealed class AppSettings
             }
 
             parsed.OutputDirectory = Path.GetFullPath(parsed.OutputDirectory);
+            if (parsed.SshPort <= 0 || parsed.SshPort > 65535)
+            {
+                parsed.SshPort = 22;
+            }
+
+            if (string.IsNullOrWhiteSpace(parsed.RemoteDirectory))
+            {
+                parsed.RemoteDirectory = ".";
+            }
+
             return parsed;
         }
         catch
@@ -854,6 +1160,136 @@ internal sealed class AppSettings
         Directory.CreateDirectory(SettingsDirectory);
         var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
         File.WriteAllText(SettingsFilePath, json);
+    }
+
+    internal string GetSshPassword()
+    {
+        if (string.IsNullOrWhiteSpace(SshPasswordBase64))
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            return Encoding.UTF8.GetString(Convert.FromBase64String(SshPasswordBase64));
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    internal void SetSshPassword(string password)
+    {
+        SshPasswordBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(password));
+    }
+
+    internal bool TryGetRemoteUploadConfig(out RemoteUploadConfig config, out string error)
+    {
+        config = default;
+        error = string.Empty;
+
+        var password = GetSshPassword();
+        if (string.IsNullOrWhiteSpace(SshHost))
+        {
+            error = "SSH host is not configured";
+            return false;
+        }
+
+        if (SshPort <= 0 || SshPort > 65535)
+        {
+            error = "SSH port is invalid";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(SshUser))
+        {
+            error = "SSH user is not configured";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(password))
+        {
+            error = "SSH password is not configured";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(RemoteDirectory))
+        {
+            error = "remote directory is not configured";
+            return false;
+        }
+
+        config = new RemoteUploadConfig(SshHost, SshPort, SshUser, password, RemoteDirectory);
+        return true;
+    }
+}
+
+internal readonly record struct RemoteUploadConfig(
+    string Host,
+    int Port,
+    string User,
+    string Password,
+    string RemoteDirectory);
+
+internal static class RemoteUploader
+{
+    internal static void TestConnection(RemoteUploadConfig config)
+    {
+        using var client = CreateSftpClient(config);
+        client.Connect();
+        try
+        {
+            if (!client.Exists(config.RemoteDirectory))
+            {
+                throw new DirectoryNotFoundException($"Remote directory does not exist: {config.RemoteDirectory}");
+            }
+        }
+        finally
+        {
+            client.Disconnect();
+        }
+    }
+
+    internal static string UploadFile(string localFilePath, RemoteUploadConfig config)
+    {
+        var fileName = Path.GetFileName(localFilePath);
+        var remotePath = CombineRemotePath(config.RemoteDirectory, fileName);
+
+        using var client = CreateSftpClient(config);
+        client.Connect();
+        try
+        {
+            if (!client.Exists(config.RemoteDirectory))
+            {
+                throw new DirectoryNotFoundException($"Remote directory does not exist: {config.RemoteDirectory}");
+            }
+
+            using var stream = File.OpenRead(localFilePath);
+            client.UploadFile(stream, remotePath, true);
+            return remotePath;
+        }
+        finally
+        {
+            client.Disconnect();
+        }
+    }
+
+    private static SftpClient CreateSftpClient(RemoteUploadConfig config)
+    {
+        var client = new SftpClient(config.Host, config.Port, config.User, config.Password)
+        {
+            OperationTimeout = TimeSpan.FromSeconds(30),
+            KeepAliveInterval = TimeSpan.FromSeconds(15),
+        };
+        client.ConnectionInfo.Timeout = TimeSpan.FromSeconds(15);
+        return client;
+    }
+
+    private static string CombineRemotePath(string directory, string fileName)
+    {
+        var trimmed = directory.TrimEnd('/');
+        return string.IsNullOrEmpty(trimmed) ? fileName : $"{trimmed}/{fileName}";
     }
 }
 
@@ -903,7 +1339,17 @@ internal sealed class ClipboardListenerWindow : NativeWindow, IDisposable
 
 internal static class TrayIconFactory
 {
-    internal static Icon Create()
+    internal static Icon CreateNormal()
+    {
+        return Create(Color.FromArgb(0, 120, 80), drawUploadBadge: false);
+    }
+
+    internal static Icon CreateUploading()
+    {
+        return Create(Color.FromArgb(0, 95, 170), drawUploadBadge: true);
+    }
+
+    private static Icon Create(Color backgroundColor, bool drawUploadBadge)
     {
         using var bmp = new Bitmap(32, 32);
         using (var g = Graphics.FromImage(bmp))
@@ -911,13 +1357,23 @@ internal static class TrayIconFactory
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.Clear(Color.Transparent);
 
-            using var bgBrush = new SolidBrush(Color.FromArgb(0, 120, 80));
+            using var bgBrush = new SolidBrush(backgroundColor);
             FillRoundedRectangle(g, bgBrush, 2, 2, 28, 28, 7);
 
             using var pen = new Pen(Color.White, 2f);
             g.DrawRectangle(pen, 8, 7, 12, 10);
             g.DrawLine(pen, 12, 20, 24, 20);
             g.DrawLine(pen, 24, 20, 24, 12);
+
+            if (drawUploadBadge)
+            {
+                using var badgeBrush = new SolidBrush(Color.FromArgb(255, 190, 45));
+                g.FillEllipse(badgeBrush, 17, 3, 12, 12);
+                using var badgePen = new Pen(Color.White, 1.6f);
+                g.DrawLine(badgePen, 23, 12, 23, 6);
+                g.DrawLine(badgePen, 20, 9, 23, 6);
+                g.DrawLine(badgePen, 26, 9, 23, 6);
+            }
         }
 
         var hIcon = bmp.GetHicon();

@@ -13,6 +13,7 @@ This solves the common issue where Windows Terminal cannot paste bitmap clipboar
 - Replaces clipboard with quoted path text
   - Windows mode: `"C:\\...\\clipboard_....png"`
   - Optional WSL mode: `"/mnt/c/.../clipboard_....png"`
+- Optional SFTP upload to a remote SSH server after the PNG is saved
 - Leaves normal text clipboard entries unchanged
 - Includes loop-prevention, debounce, retry logic, and dedupe hashing
 
@@ -54,6 +55,9 @@ Tray menu:
 
 - Output folder for saved PNG files
 - Toggle `Convert clipboard path to WSL format (/mnt/c/...)`
+- Toggle `Remote upload enabled`
+- SSH credentials dialog for host, port, user, password, and remote directory
+- SSH test connection button that verifies login and remote directory access
 
 Settings are stored at:
 
