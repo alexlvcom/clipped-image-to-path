@@ -54,6 +54,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
     private readonly ClipboardListenerWindow _listenerWindow;
     private readonly NotifyIcon _notifyIcon;
     private readonly Icon _trayIcon;
+    private readonly Icon _remoteUploadTrayIcon;
     private readonly Icon _uploadingTrayIcon;
     private readonly System.Windows.Forms.Timer _deferredProcessTimer;
     private readonly System.Windows.Forms.Timer _clipboardInjectTimer;
@@ -62,6 +63,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
     private Bitmap? _pendingClipboardImage;
     private string? _lastInjectedClipboardText;
     private string? _lastInjectedImageSha256;
+    private ToolStripMenuItem? _remoteUploadStatusMenuItem;
     private DateTime _lastInjectedUtc = DateTime.MinValue;
     private int _activeUploadCount;
     private DateTime _uploadStartedUtc;
@@ -73,11 +75,12 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         EnsureOutputDirectoryExists();
 
         _trayIcon = TrayIconFactory.CreateNormal();
+        _remoteUploadTrayIcon = TrayIconFactory.CreateRemoteUploadEnabled();
         _uploadingTrayIcon = TrayIconFactory.CreateUploading();
         _notifyIcon = new NotifyIcon
         {
-            Icon = _trayIcon,
-            Text = AppName,
+            Icon = GetIdleTrayIcon(),
+            Text = GetIdleTrayText(),
             Visible = true,
             ContextMenuStrip = BuildMenu(),
         };
@@ -126,6 +129,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();
             _trayIcon.Dispose();
+            _remoteUploadTrayIcon.Dispose();
             _uploadingTrayIcon.Dispose();
         }
 
@@ -135,6 +139,13 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
     private ContextMenuStrip BuildMenu()
     {
         var menu = new ContextMenuStrip();
+        _remoteUploadStatusMenuItem = new ToolStripMenuItem
+        {
+            Enabled = false,
+        };
+        UpdateRemoteUploadStatusMenuItem();
+        menu.Items.Add(_remoteUploadStatusMenuItem);
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Open output folder", null, (_, _) =>
         {
             try
@@ -275,6 +286,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             _settings.ConvertToWslPath = wslCheck.Checked;
             _settings.RemoteUploadEnabled = uploadCheck.Checked;
             _settings.Save();
+            RefreshIdleTrayIcon();
             Log("settings updated");
         }
         catch (Exception ex)
@@ -452,10 +464,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
 
     private void ShowAboutDialog()
     {
-        var version = Assembly.GetExecutingAssembly()
-            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
-            ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString()
-            ?? "unknown";
+        var version = GetDisplayVersion();
 
         using var about = new Form
         {
@@ -465,24 +474,34 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             MaximizeBox = false,
             MinimizeBox = false,
             ShowInTaskbar = false,
-            ClientSize = new Size(560, 215),
+            ClientSize = new Size(600, 260),
         };
 
-        var body =
-            $"{AppName}\r\n" +
-            $"Version: {version}\r\n" +
-            $"Build summary: Added optional SSH/SFTP screenshot upload with connection testing.\r\n" +
-            $"Output folder: {_settings.OutputDirectory}\r\n" +
-            $"Build date: {File.GetLastWriteTime(Application.ExecutablePath):yyyy-MM-dd HH:mm:ss}\r\n" +
-            $"Copyright (c) Alex LV";
-
-        var label = new Label
+        var title = new Label
         {
             AutoSize = false,
-            Dock = DockStyle.Fill,
-            Padding = new Padding(16),
-            Text = body,
+            Font = new Font(SystemFonts.MessageBoxFont ?? Control.DefaultFont, FontStyle.Bold),
+            Location = new Point(18, 18),
+            Size = new Size(about.ClientSize.Width - 36, 24),
+            Text = AppName,
         };
+
+        var details = new TableLayoutPanel
+        {
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+            AutoSize = true,
+            ColumnCount = 2,
+            Location = new Point(18, 54),
+            RowCount = 4,
+            Width = about.ClientSize.Width - 36,
+        };
+        details.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 125));
+        details.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        AddAboutRow(details, 0, "Version", version);
+        AddAboutRow(details, 1, "Build date", File.GetLastWriteTime(Application.ExecutablePath).ToString("yyyy-MM-dd HH:mm:ss"));
+        AddAboutRow(details, 2, "Build summary", "Remote upload tray status and improved About window.");
+        AddAboutRow(details, 3, "Copyright", $"(c) {DateTime.Now.Year} Alex LV");
 
         var close = new Button
         {
@@ -493,11 +512,45 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             Location = new Point(about.ClientSize.Width - 96, about.ClientSize.Height - 44),
         };
 
-        about.Controls.Add(label);
+        about.Controls.Add(title);
+        about.Controls.Add(details);
         about.Controls.Add(close);
         about.AcceptButton = close;
 
         _ = about.ShowDialog();
+    }
+
+    private static string GetDisplayVersion()
+    {
+        var version = Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString()
+            ?? "unknown";
+
+        var suffixIndex = version.IndexOf('+');
+        return suffixIndex >= 0 ? version[..suffixIndex] : version;
+    }
+
+    private static void AddAboutRow(TableLayoutPanel table, int row, string label, string value)
+    {
+        table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        table.Controls.Add(new Label
+        {
+            AutoSize = true,
+            Font = new Font(SystemFonts.MessageBoxFont ?? Control.DefaultFont, FontStyle.Bold),
+            Margin = new Padding(0, 0, 12, 8),
+            Text = $"{label}:",
+        }, 0, row);
+
+        table.Controls.Add(new Label
+        {
+            AutoSize = true,
+            Anchor = AnchorStyles.Left | AnchorStyles.Right,
+            Margin = new Padding(0, 0, 0, 8),
+            MaximumSize = new Size(460, 0),
+            Text = value,
+        }, 1, row);
     }
 
     private void HandleClipboardUpdate()
@@ -752,10 +805,39 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             if (_activeUploadCount == 0)
             {
                 _uploadStatusTimer.Stop();
-                _notifyIcon.Icon = _trayIcon;
-                _notifyIcon.Text = AppName;
+                _notifyIcon.Icon = GetIdleTrayIcon();
+                _notifyIcon.Text = GetIdleTrayText();
             }
         }, null);
+    }
+
+    private Icon GetIdleTrayIcon()
+    {
+        return _settings.RemoteUploadEnabled ? _remoteUploadTrayIcon : _trayIcon;
+    }
+
+    private void RefreshIdleTrayIcon()
+    {
+        UpdateRemoteUploadStatusMenuItem();
+        if (_activeUploadCount == 0)
+        {
+            _notifyIcon.Icon = GetIdleTrayIcon();
+            _notifyIcon.Text = GetIdleTrayText();
+        }
+    }
+
+    private string GetIdleTrayText()
+    {
+        return _settings.RemoteUploadEnabled ? $"{AppName} - Remote upload enabled" : AppName;
+    }
+
+    private void UpdateRemoteUploadStatusMenuItem()
+    {
+        if (_remoteUploadStatusMenuItem is not null)
+        {
+            var status = _settings.RemoteUploadEnabled ? "enabled" : "disabled";
+            _remoteUploadStatusMenuItem.Text = $"Remote upload: {status}";
+        }
     }
 
     private void UpdateUploadTrayStatus()
@@ -1341,15 +1423,20 @@ internal static class TrayIconFactory
 {
     internal static Icon CreateNormal()
     {
-        return Create(Color.FromArgb(0, 120, 80), drawUploadBadge: false);
+        return Create(Color.FromArgb(0, 120, 80), Color.White, drawUploadBadge: false);
+    }
+
+    internal static Icon CreateRemoteUploadEnabled()
+    {
+        return Create(Color.FromArgb(0, 120, 80), Color.FromArgb(255, 210, 0), drawUploadBadge: false);
     }
 
     internal static Icon CreateUploading()
     {
-        return Create(Color.FromArgb(0, 95, 170), drawUploadBadge: true);
+        return Create(Color.FromArgb(0, 95, 170), Color.White, drawUploadBadge: true);
     }
 
-    private static Icon Create(Color backgroundColor, bool drawUploadBadge)
+    private static Icon Create(Color backgroundColor, Color foregroundColor, bool drawUploadBadge)
     {
         using var bmp = new Bitmap(32, 32);
         using (var g = Graphics.FromImage(bmp))
@@ -1360,7 +1447,11 @@ internal static class TrayIconFactory
             using var bgBrush = new SolidBrush(backgroundColor);
             FillRoundedRectangle(g, bgBrush, 2, 2, 28, 28, 7);
 
-            using var pen = new Pen(Color.White, 2f);
+            using var fillBrush = new SolidBrush(Color.FromArgb(60, foregroundColor));
+            g.FillRectangle(fillBrush, 9, 8, 10, 8);
+            g.FillRectangle(fillBrush, 13, 18, 8, 3);
+
+            using var pen = new Pen(foregroundColor, 2f);
             g.DrawRectangle(pen, 8, 7, 12, 10);
             g.DrawLine(pen, 12, 20, 24, 20);
             g.DrawLine(pen, 24, 20, 24, 12);
