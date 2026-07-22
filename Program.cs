@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Windows.Forms;
+using FluentFTP;
 using Renci.SshNet;
 
 internal static class Program
@@ -233,9 +234,9 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
 
         var sshButton = new Button
         {
-            Text = "SSH credentials...",
+            Text = "Remote credentials...",
             Location = new Point(16, 150),
-            Size = new Size(130, 30),
+            Size = new Size(150, 30),
         };
         sshButton.Click += (_, _) => ShowSshSettingsDialog(settingsForm);
 
@@ -295,29 +296,83 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         }
     }
 
+    private static readonly RemoteProtocol[] ProtocolOrder =
+    {
+        RemoteProtocol.Sftp,
+        RemoteProtocol.Ftp,
+        RemoteProtocol.FtpsExplicit,
+        RemoteProtocol.FtpsImplicit,
+    };
+
+    private static readonly string[] ProtocolLabels =
+    {
+        "SFTP (SSH)",
+        "FTP (plain)",
+        "FTPS (explicit TLS)",
+        "FTPS (implicit TLS)",
+    };
+
+    private static int DefaultPortFor(RemoteProtocol protocol) => protocol switch
+    {
+        RemoteProtocol.Sftp => 22,
+        RemoteProtocol.Ftp => 21,
+        RemoteProtocol.FtpsExplicit => 21,
+        RemoteProtocol.FtpsImplicit => 990,
+        _ => 22,
+    };
+
     private void ShowSshSettingsDialog(IWin32Window owner)
     {
         using var sshForm = new Form
         {
-            Text = "SSH Credentials",
+            Text = "Remote Credentials",
             StartPosition = FormStartPosition.CenterParent,
             FormBorderStyle = FormBorderStyle.FixedDialog,
             MaximizeBox = false,
             MinimizeBox = false,
             ShowInTaskbar = false,
-            ClientSize = new Size(460, 270),
+            ClientSize = new Size(460, 352),
         };
 
-        var hostText = AddLabeledTextBox(sshForm, "Host:", _settings.SshHost, 16, false);
-        var portText = AddLabeledTextBox(sshForm, "Port:", _settings.SshPort.ToString(), 58, false);
-        var userText = AddLabeledTextBox(sshForm, "User:", _settings.SshUser, 100, false);
-        var passwordText = AddLabeledTextBox(sshForm, "Password:", _settings.GetSshPassword(), 142, true);
-        var remoteDirectoryText = AddLabeledTextBox(sshForm, "Remote directory:", _settings.RemoteDirectory, 184, false);
+        var protocolCombo = AddLabeledComboBox(sshForm, "Protocol:", ProtocolLabels, 16);
+        var currentProtocol = _settings.GetRemoteProtocol();
+        protocolCombo.SelectedIndex = Math.Max(0, Array.IndexOf(ProtocolOrder, currentProtocol));
+
+        var hostText = AddLabeledTextBox(sshForm, "Host:", _settings.SshHost, 58, false);
+        var portText = AddLabeledTextBox(sshForm, "Port:", _settings.SshPort.ToString(), 100, false);
+        var userText = AddLabeledTextBox(sshForm, "User:", _settings.SshUser, 142, false);
+        var passwordText = AddLabeledTextBox(sshForm, "Password:", _settings.GetSshPassword(), 184, true);
+        var remoteDirectoryText = AddLabeledTextBox(sshForm, "Remote directory:", _settings.RemoteDirectory, 226, false);
+
+        var passiveCheck = new CheckBox
+        {
+            Text = "Use passive mode (FTP/FTPS)",
+            AutoSize = true,
+            Location = new Point(140, 272),
+            Checked = _settings.PassiveMode,
+        };
+        sshForm.Controls.Add(passiveCheck);
+
+        // When the user switches protocol, follow that protocol's conventional port if the
+        // field still holds another protocol's default (i.e. it was never customized).
+        var lastProtocol = currentProtocol;
+        protocolCombo.SelectedIndexChanged += (_, _) =>
+        {
+            var newProtocol = ProtocolOrder[protocolCombo.SelectedIndex];
+            if (int.TryParse(portText.Text.Trim(), out var currentPort) && currentPort == DefaultPortFor(lastProtocol))
+            {
+                portText.Text = DefaultPortFor(newProtocol).ToString();
+            }
+
+            lastProtocol = newProtocol;
+        };
+
+        RemoteProtocol SelectedProtocol() => ProtocolOrder[protocolCombo.SelectedIndex];
 
         var testButton = new Button
         {
             Text = "Test connection",
-            Location = new Point(16, 226),
+            Location = new Point(16, 308),
             Size = new Size(120, 30),
         };
 
@@ -325,7 +380,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         {
             Text = "Save",
             DialogResult = DialogResult.OK,
-            Location = new Point(275, 226),
+            Location = new Point(275, 308),
             Size = new Size(80, 30),
         };
 
@@ -333,13 +388,13 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         {
             Text = "Cancel",
             DialogResult = DialogResult.Cancel,
-            Location = new Point(365, 226),
+            Location = new Point(365, 308),
             Size = new Size(80, 30),
         };
 
         testButton.Click += async (_, _) =>
         {
-            if (!TryReadSshDialogValues(hostText, portText, userText, passwordText, remoteDirectoryText, out var config, out var error))
+            if (!TryReadSshDialogValues(SelectedProtocol(), passiveCheck.Checked, hostText, portText, userText, passwordText, remoteDirectoryText, out var config, out var error))
             {
                 MessageBox.Show(error, AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
@@ -350,11 +405,11 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             try
             {
                 await Task.Run(() => RemoteUploader.TestConnection(config));
-                MessageBox.Show("SSH connection and remote directory are available.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("Connection succeeded and the remote directory is available.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"SSH test failed: {ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show($"Connection test failed: {ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
             {
@@ -374,19 +429,43 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             return;
         }
 
-        if (!TryReadSshDialogValues(hostText, portText, userText, passwordText, remoteDirectoryText, out var sshConfig, out var validationError))
+        if (!TryReadSshDialogValues(SelectedProtocol(), passiveCheck.Checked, hostText, portText, userText, passwordText, remoteDirectoryText, out var sshConfig, out var validationError))
         {
             MessageBox.Show(validationError, AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
+        _settings.SetRemoteProtocol(sshConfig.Protocol);
+        _settings.PassiveMode = sshConfig.PassiveMode;
         _settings.SshHost = sshConfig.Host;
         _settings.SshPort = sshConfig.Port;
         _settings.SshUser = sshConfig.User;
         _settings.SetSshPassword(sshConfig.Password);
         _settings.RemoteDirectory = sshConfig.RemoteDirectory;
         _settings.Save();
-        Log("ssh settings updated");
+        Log("remote credentials updated");
+    }
+
+    private static ComboBox AddLabeledComboBox(Form form, string labelText, string[] items, int y)
+    {
+        var label = new Label
+        {
+            Text = labelText,
+            AutoSize = true,
+            Location = new Point(16, y + 4),
+        };
+
+        var combo = new ComboBox
+        {
+            Location = new Point(140, y),
+            Size = new Size(305, 26),
+            DropDownStyle = ComboBoxStyle.DropDownList,
+        };
+        combo.Items.AddRange(items);
+
+        form.Controls.Add(label);
+        form.Controls.Add(combo);
+        return combo;
     }
 
     private static TextBox AddLabeledTextBox(Form form, string labelText, string value, int y, bool usePasswordChar)
@@ -412,6 +491,8 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
     }
 
     private static bool TryReadSshDialogValues(
+        RemoteProtocol protocol,
+        bool passiveMode,
         TextBox hostText,
         TextBox portText,
         TextBox userText,
@@ -458,7 +539,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             return false;
         }
 
-        config = new RemoteUploadConfig(host, port, user, password, remoteDirectory);
+        config = new RemoteUploadConfig(protocol, host, port, user, password, remoteDirectory, passiveMode);
         return true;
     }
 
@@ -500,7 +581,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
 
         AddAboutRow(details, 0, "Version", version);
         AddAboutRow(details, 1, "Build date", File.GetLastWriteTime(Application.ExecutablePath).ToString("yyyy-MM-dd HH:mm:ss"));
-        AddAboutRow(details, 2, "Build summary", "Remote upload tray status and improved About window.");
+        AddAboutRow(details, 2, "Build summary", "Added FTP/FTPS upload support alongside SFTP.");
         AddAboutRow(details, 3, "Copyright", $"(c) {DateTime.Now.Year} Alex LV");
 
         var close = new Button
@@ -1186,6 +1267,12 @@ internal sealed class AppSettings
 
     public bool RemoteUploadEnabled { get; set; }
 
+    // Persisted as a string for forward/backward compatibility. One of:
+    // "Sftp", "Ftp", "FtpsExplicit", "FtpsImplicit".
+    public string Protocol { get; set; } = "Sftp";
+
+    public bool PassiveMode { get; set; } = true;
+
     public string SshHost { get; set; } = string.Empty;
 
     public int SshPort { get; set; } = 22;
@@ -1266,6 +1353,18 @@ internal sealed class AppSettings
         SshPasswordBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(password));
     }
 
+    internal RemoteProtocol GetRemoteProtocol()
+    {
+        return Enum.TryParse<RemoteProtocol>(Protocol, ignoreCase: true, out var parsed)
+            ? parsed
+            : RemoteProtocol.Sftp;
+    }
+
+    internal void SetRemoteProtocol(RemoteProtocol protocol)
+    {
+        Protocol = protocol.ToString();
+    }
+
     internal bool TryGetRemoteUploadConfig(out RemoteUploadConfig config, out string error)
     {
         config = default;
@@ -1302,21 +1401,50 @@ internal sealed class AppSettings
             return false;
         }
 
-        config = new RemoteUploadConfig(SshHost, SshPort, SshUser, password, RemoteDirectory);
+        config = new RemoteUploadConfig(GetRemoteProtocol(), SshHost, SshPort, SshUser, password, RemoteDirectory, PassiveMode);
         return true;
     }
 }
 
+internal enum RemoteProtocol
+{
+    Sftp,
+    Ftp,
+    FtpsExplicit,
+    FtpsImplicit,
+}
+
 internal readonly record struct RemoteUploadConfig(
+    RemoteProtocol Protocol,
     string Host,
     int Port,
     string User,
     string Password,
-    string RemoteDirectory);
+    string RemoteDirectory,
+    bool PassiveMode);
 
 internal static class RemoteUploader
 {
     internal static void TestConnection(RemoteUploadConfig config)
+    {
+        if (config.Protocol == RemoteProtocol.Sftp)
+        {
+            SftpTestConnection(config);
+        }
+        else
+        {
+            FtpTestConnection(config);
+        }
+    }
+
+    internal static string UploadFile(string localFilePath, RemoteUploadConfig config)
+    {
+        return config.Protocol == RemoteProtocol.Sftp
+            ? SftpUploadFile(localFilePath, config)
+            : FtpUploadFile(localFilePath, config);
+    }
+
+    private static void SftpTestConnection(RemoteUploadConfig config)
     {
         using var client = CreateSftpClient(config);
         client.Connect();
@@ -1333,7 +1461,7 @@ internal static class RemoteUploader
         }
     }
 
-    internal static string UploadFile(string localFilePath, RemoteUploadConfig config)
+    private static string SftpUploadFile(string localFilePath, RemoteUploadConfig config)
     {
         var fileName = Path.GetFileName(localFilePath);
         var remotePath = CombineRemotePath(config.RemoteDirectory, fileName);
@@ -1365,6 +1493,73 @@ internal static class RemoteUploader
             KeepAliveInterval = TimeSpan.FromSeconds(15),
         };
         client.ConnectionInfo.Timeout = TimeSpan.FromSeconds(15);
+        return client;
+    }
+
+    private static void FtpTestConnection(RemoteUploadConfig config)
+    {
+        using var client = CreateFtpClient(config);
+        client.Connect();
+        try
+        {
+            if (!client.DirectoryExists(config.RemoteDirectory))
+            {
+                throw new DirectoryNotFoundException($"Remote directory does not exist: {config.RemoteDirectory}");
+            }
+        }
+        finally
+        {
+            client.Disconnect();
+        }
+    }
+
+    private static string FtpUploadFile(string localFilePath, RemoteUploadConfig config)
+    {
+        var fileName = Path.GetFileName(localFilePath);
+        var remotePath = CombineRemotePath(config.RemoteDirectory, fileName);
+
+        using var client = CreateFtpClient(config);
+        client.Connect();
+        try
+        {
+            if (!client.DirectoryExists(config.RemoteDirectory))
+            {
+                throw new DirectoryNotFoundException($"Remote directory does not exist: {config.RemoteDirectory}");
+            }
+
+            var status = client.UploadFile(localFilePath, remotePath, FtpRemoteExists.Overwrite, createRemoteDir: false);
+            if (status == FtpStatus.Failed)
+            {
+                throw new IOException($"FTP upload failed: {remotePath}");
+            }
+
+            return remotePath;
+        }
+        finally
+        {
+            client.Disconnect();
+        }
+    }
+
+    private static FtpClient CreateFtpClient(RemoteUploadConfig config)
+    {
+        var client = new FtpClient(config.Host, config.User, config.Password, config.Port);
+        client.Config.EncryptionMode = config.Protocol switch
+        {
+            RemoteProtocol.FtpsExplicit => FtpEncryptionMode.Explicit,
+            RemoteProtocol.FtpsImplicit => FtpEncryptionMode.Implicit,
+            _ => FtpEncryptionMode.None,
+        };
+
+        // Local FileZilla servers typically use a self-signed certificate, so trust any presented cert.
+        client.Config.ValidateAnyCertificate = true;
+        client.Config.DataConnectionType = config.PassiveMode
+            ? FtpDataConnectionType.AutoPassive
+            : FtpDataConnectionType.AutoActive;
+        client.Config.ConnectTimeout = 15000;
+        client.Config.ReadTimeout = 30000;
+        client.Config.DataConnectionConnectTimeout = 15000;
+        client.Config.DataConnectionReadTimeout = 30000;
         return client;
     }
 

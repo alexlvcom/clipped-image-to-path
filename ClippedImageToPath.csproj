@@ -8,13 +8,14 @@
     <AssemblyName>ClippedImageToPath</AssemblyName>
     <RootNamespace>ClippedImageToPath</RootNamespace>
     <Product>ClippedImageToPath</Product>
-    <Version>1.1.2</Version>
-    <FileVersion>1.1.2.0</FileVersion>
-    <AssemblyVersion>1.1.2.0</AssemblyVersion>
-    <InformationalVersion>1.1.2</InformationalVersion>
+    <Version>1.2.0</Version>
+    <FileVersion>1.2.0.0</FileVersion>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <InformationalVersion>1.2.0</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="SSH.NET" Version="2024.2.0" />
+    <PackageReference Include="FluentFTP" Version="52.1.0" />
   </ItemGroup>
 </Project>
