@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Windows.Forms;
 using FluentFTP;
 using Renci.SshNet;
@@ -65,6 +66,8 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
     private string? _lastInjectedClipboardText;
     private string? _lastInjectedImageSha256;
     private ToolStripMenuItem? _remoteUploadStatusMenuItem;
+    private ToolStripMenuItem? _activeServerMenuItem;
+    private bool _suppressMenuCloseOnce;
     private DateTime _lastInjectedUtc = DateTime.MinValue;
     private int _activeUploadCount;
     private DateTime _uploadStartedUtc;
@@ -140,12 +143,30 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
     private ContextMenuStrip BuildMenu()
     {
         var menu = new ContextMenuStrip();
-        _remoteUploadStatusMenuItem = new ToolStripMenuItem
+
+        _remoteUploadStatusMenuItem = new ToolStripMenuItem("Enable Remote Upload")
         {
-            Enabled = false,
+            CheckOnClick = false,
         };
+        _remoteUploadStatusMenuItem.Click += (_, _) => ToggleRemoteUpload();
         UpdateRemoteUploadStatusMenuItem();
         menu.Items.Add(_remoteUploadStatusMenuItem);
+
+        _activeServerMenuItem = new ToolStripMenuItem("Active server");
+        menu.Items.Add(_activeServerMenuItem);
+        menu.Opening += (_, _) => RebuildActiveServerMenu();
+
+        // Keep the menu open when the user toggles remote upload, so they can see the state flip.
+        menu.Closing += (_, e) =>
+        {
+            if (_suppressMenuCloseOnce && e.CloseReason == ToolStripDropDownCloseReason.ItemClicked)
+            {
+                e.Cancel = true;
+            }
+
+            _suppressMenuCloseOnce = false;
+        };
+
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Open output folder", null, (_, _) =>
         {
@@ -234,11 +255,11 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
 
         var sshButton = new Button
         {
-            Text = "Remote credentials...",
+            Text = "Remote servers...",
             Location = new Point(16, 150),
             Size = new Size(150, 30),
         };
-        sshButton.Click += (_, _) => ShowSshSettingsDialog(settingsForm);
+        sshButton.Click += (_, _) => ShowRemoteServersDialog(settingsForm);
 
         var saveButton = new Button
         {
@@ -321,35 +342,257 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         _ => 22,
     };
 
-    private void ShowSshSettingsDialog(IWin32Window owner)
+    private void ShowRemoteServersDialog(IWin32Window owner)
     {
-        using var sshForm = new Form
+        using var form = new Form
         {
-            Text = "Remote Credentials",
+            Text = "Remote Servers",
             StartPosition = FormStartPosition.CenterParent,
             FormBorderStyle = FormBorderStyle.FixedDialog,
             MaximizeBox = false,
             MinimizeBox = false,
             ShowInTaskbar = false,
-            ClientSize = new Size(460, 352),
+            ClientSize = new Size(540, 360),
         };
 
-        var protocolCombo = AddLabeledComboBox(sshForm, "Protocol:", ProtocolLabels, 16);
-        var currentProtocol = _settings.GetRemoteProtocol();
+        var hint = new Label
+        {
+            Text = "The server marked ● is used for uploads. Double-click to edit.",
+            AutoSize = true,
+            Location = new Point(16, 12),
+        };
+
+        var list = new ListBox
+        {
+            Location = new Point(16, 36),
+            Size = new Size(380, 300),
+            IntegralHeight = false,
+        };
+
+        void Reload(int selectIndex)
+        {
+            list.BeginUpdate();
+            list.Items.Clear();
+            foreach (var server in _settings.RemoteServers)
+            {
+                var active = string.Equals(server.Name, _settings.ActiveServer, StringComparison.Ordinal);
+                list.Items.Add((active ? "● " : "    ") + server.DisplayLine());
+            }
+
+            list.EndUpdate();
+
+            if (list.Items.Count == 0)
+            {
+                return;
+            }
+
+            list.SelectedIndex = Math.Clamp(selectIndex, 0, list.Items.Count - 1);
+        }
+
+        RemoteServer? Selected() =>
+            list.SelectedIndex >= 0 && list.SelectedIndex < _settings.RemoteServers.Count
+                ? _settings.RemoteServers[list.SelectedIndex]
+                : null;
+
+        const int buttonX = 408;
+        const int buttonWidth = 116;
+
+        var addButton = new Button { Text = "Add...", Location = new Point(buttonX, 36), Size = new Size(buttonWidth, 30) };
+        var editButton = new Button { Text = "Edit...", Location = new Point(buttonX, 72), Size = new Size(buttonWidth, 30) };
+        var removeButton = new Button { Text = "Remove", Location = new Point(buttonX, 108), Size = new Size(buttonWidth, 30) };
+        var activeButton = new Button { Text = "Set as active", Location = new Point(buttonX, 158), Size = new Size(buttonWidth, 30) };
+        var testButton = new Button { Text = "Test", Location = new Point(buttonX, 194), Size = new Size(buttonWidth, 30) };
+        var closeButton = new Button { Text = "Close", DialogResult = DialogResult.OK, Location = new Point(buttonX, 306), Size = new Size(buttonWidth, 30) };
+
+        addButton.Click += (_, _) =>
+        {
+            var server = new RemoteServer
+            {
+                Name = SuggestServerName(),
+                Protocol = RemoteProtocol.Sftp.ToString(),
+                Port = DefaultPortFor(RemoteProtocol.Sftp),
+            };
+            if (EditRemoteServer(form, server, isNew: true))
+            {
+                _settings.RemoteServers.Add(server);
+                if (_settings.RemoteServers.Count == 1)
+                {
+                    _settings.ActiveServer = server.Name;
+                }
+
+                _settings.Save();
+                RefreshIdleTrayIcon();
+                Log($"remote server added: {server.Name}");
+                Reload(_settings.RemoteServers.Count - 1);
+            }
+        };
+
+        void EditSelected()
+        {
+            var server = Selected();
+            if (server is null)
+            {
+                return;
+            }
+
+            var previousName = server.Name;
+            var index = list.SelectedIndex;
+            if (EditRemoteServer(form, server, isNew: false))
+            {
+                // Keep the active pointer aligned if the active server was renamed.
+                if (string.Equals(_settings.ActiveServer, previousName, StringComparison.Ordinal))
+                {
+                    _settings.ActiveServer = server.Name;
+                }
+
+                _settings.Save();
+                RefreshIdleTrayIcon();
+                Log($"remote server updated: {server.Name}");
+                Reload(index);
+            }
+        }
+
+        editButton.Click += (_, _) => EditSelected();
+        list.DoubleClick += (_, _) => EditSelected();
+
+        removeButton.Click += (_, _) =>
+        {
+            var server = Selected();
+            if (server is null)
+            {
+                return;
+            }
+
+            var confirm = MessageBox.Show(
+                $"Remove server '{server.Name}'?",
+                AppName,
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+            if (confirm != DialogResult.Yes)
+            {
+                return;
+            }
+
+            var index = list.SelectedIndex;
+            var wasActive = string.Equals(_settings.ActiveServer, server.Name, StringComparison.Ordinal);
+            _settings.RemoteServers.Remove(server);
+            if (wasActive)
+            {
+                _settings.ActiveServer = _settings.RemoteServers.Count > 0 ? _settings.RemoteServers[0].Name : string.Empty;
+            }
+
+            _settings.Save();
+            RefreshIdleTrayIcon();
+            Log($"remote server removed: {server.Name}");
+            Reload(index);
+        };
+
+        activeButton.Click += (_, _) =>
+        {
+            var server = Selected();
+            if (server is null)
+            {
+                return;
+            }
+
+            _settings.ActiveServer = server.Name;
+            _settings.Save();
+            RefreshIdleTrayIcon();
+            Log($"active server -> {server.Name}");
+            Reload(list.SelectedIndex);
+        };
+
+        testButton.Click += async (_, _) =>
+        {
+            var server = Selected();
+            if (server is null)
+            {
+                return;
+            }
+
+            if (!server.TryGetConfig(out var config, out var error))
+            {
+                MessageBox.Show(error, AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            testButton.Enabled = false;
+            testButton.Text = "Testing...";
+            try
+            {
+                await Task.Run(() => RemoteUploader.TestConnection(config));
+                MessageBox.Show("Connection succeeded and the remote directory is available.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Connection test failed: {ex.Message}", AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                testButton.Text = "Test";
+                testButton.Enabled = true;
+            }
+        };
+
+        form.Controls.Add(hint);
+        form.Controls.Add(list);
+        form.Controls.Add(addButton);
+        form.Controls.Add(editButton);
+        form.Controls.Add(removeButton);
+        form.Controls.Add(activeButton);
+        form.Controls.Add(testButton);
+        form.Controls.Add(closeButton);
+        form.AcceptButton = closeButton;
+        form.CancelButton = closeButton;
+
+        Reload(_settings.RemoteServers.FindIndex(s => string.Equals(s.Name, _settings.ActiveServer, StringComparison.Ordinal)));
+        form.ShowDialog(owner);
+        RefreshIdleTrayIcon();
+    }
+
+    private string SuggestServerName()
+    {
+        for (var i = 1; ; i++)
+        {
+            var candidate = $"Server {i}";
+            if (!_settings.RemoteServers.Any(s => string.Equals(s.Name, candidate, StringComparison.OrdinalIgnoreCase)))
+            {
+                return candidate;
+            }
+        }
+    }
+
+    // Edits the given server in place. Returns true only when the user saves valid values.
+    private bool EditRemoteServer(IWin32Window owner, RemoteServer server, bool isNew)
+    {
+        using var sshForm = new Form
+        {
+            Text = isNew ? "Add Remote Server" : "Edit Remote Server",
+            StartPosition = FormStartPosition.CenterParent,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            ShowInTaskbar = false,
+            ClientSize = new Size(460, 394),
+        };
+
+        var nameText = AddLabeledTextBox(sshForm, "Name:", server.Name, 16, false);
+        var protocolCombo = AddLabeledComboBox(sshForm, "Protocol:", ProtocolLabels, 58);
+        var currentProtocol = server.GetProtocol();
         protocolCombo.SelectedIndex = Math.Max(0, Array.IndexOf(ProtocolOrder, currentProtocol));
 
-        var hostText = AddLabeledTextBox(sshForm, "Host:", _settings.SshHost, 58, false);
-        var portText = AddLabeledTextBox(sshForm, "Port:", _settings.SshPort.ToString(), 100, false);
-        var userText = AddLabeledTextBox(sshForm, "User:", _settings.SshUser, 142, false);
-        var passwordText = AddLabeledTextBox(sshForm, "Password:", _settings.GetSshPassword(), 184, true);
-        var remoteDirectoryText = AddLabeledTextBox(sshForm, "Remote directory:", _settings.RemoteDirectory, 226, false);
+        var hostText = AddLabeledTextBox(sshForm, "Host:", server.Host, 100, false);
+        var portText = AddLabeledTextBox(sshForm, "Port:", server.Port.ToString(), 142, false);
+        var userText = AddLabeledTextBox(sshForm, "User:", server.User, 184, false);
+        var passwordText = AddLabeledTextBox(sshForm, "Password:", server.GetPassword(), 226, true);
+        var remoteDirectoryText = AddLabeledTextBox(sshForm, "Remote directory:", server.RemoteDirectory, 268, false);
 
         var passiveCheck = new CheckBox
         {
             Text = "Use passive mode (FTP/FTPS)",
             AutoSize = true,
-            Location = new Point(140, 272),
-            Checked = _settings.PassiveMode,
+            Location = new Point(140, 314),
+            Checked = server.PassiveMode,
         };
         sshForm.Controls.Add(passiveCheck);
 
@@ -372,15 +615,14 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         var testButton = new Button
         {
             Text = "Test connection",
-            Location = new Point(16, 308),
+            Location = new Point(16, 350),
             Size = new Size(120, 30),
         };
 
         var saveButton = new Button
         {
             Text = "Save",
-            DialogResult = DialogResult.OK,
-            Location = new Point(275, 308),
+            Location = new Point(275, 350),
             Size = new Size(80, 30),
         };
 
@@ -388,7 +630,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         {
             Text = "Cancel",
             DialogResult = DialogResult.Cancel,
-            Location = new Point(365, 308),
+            Location = new Point(365, 350),
             Size = new Size(80, 30),
         };
 
@@ -418,32 +660,45 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             }
         };
 
+        saveButton.Click += (_, _) =>
+        {
+            var name = nameText.Text.Trim();
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                MessageBox.Show("Name cannot be empty.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (_settings.RemoteServers.Any(s => !ReferenceEquals(s, server) && string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase)))
+            {
+                MessageBox.Show($"A server named '{name}' already exists.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (!TryReadSshDialogValues(SelectedProtocol(), passiveCheck.Checked, hostText, portText, userText, passwordText, remoteDirectoryText, out var config, out var error))
+            {
+                MessageBox.Show(error, AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            server.Name = name;
+            server.SetProtocol(config.Protocol);
+            server.PassiveMode = config.PassiveMode;
+            server.Host = config.Host;
+            server.Port = config.Port;
+            server.User = config.User;
+            server.SetPassword(config.Password);
+            server.RemoteDirectory = config.RemoteDirectory;
+            sshForm.DialogResult = DialogResult.OK;
+        };
+
         sshForm.Controls.Add(testButton);
         sshForm.Controls.Add(saveButton);
         sshForm.Controls.Add(cancelButton);
         sshForm.AcceptButton = saveButton;
         sshForm.CancelButton = cancelButton;
 
-        if (sshForm.ShowDialog(owner) != DialogResult.OK)
-        {
-            return;
-        }
-
-        if (!TryReadSshDialogValues(SelectedProtocol(), passiveCheck.Checked, hostText, portText, userText, passwordText, remoteDirectoryText, out var sshConfig, out var validationError))
-        {
-            MessageBox.Show(validationError, AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
-        _settings.SetRemoteProtocol(sshConfig.Protocol);
-        _settings.PassiveMode = sshConfig.PassiveMode;
-        _settings.SshHost = sshConfig.Host;
-        _settings.SshPort = sshConfig.Port;
-        _settings.SshUser = sshConfig.User;
-        _settings.SetSshPassword(sshConfig.Password);
-        _settings.RemoteDirectory = sshConfig.RemoteDirectory;
-        _settings.Save();
-        Log("remote credentials updated");
+        return sshForm.ShowDialog(owner) == DialogResult.OK;
     }
 
     private static ComboBox AddLabeledComboBox(Form form, string labelText, string[] items, int y)
@@ -581,7 +836,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
 
         AddAboutRow(details, 0, "Version", version);
         AddAboutRow(details, 1, "Build date", File.GetLastWriteTime(Application.ExecutablePath).ToString("yyyy-MM-dd HH:mm:ss"));
-        AddAboutRow(details, 2, "Build summary", "Added FTP/FTPS upload support alongside SFTP.");
+        AddAboutRow(details, 2, "Build summary", "Tray 'Enable Remote Upload' checkbox toggle that keeps the menu open.");
         AddAboutRow(details, 3, "Copyright", $"(c) {DateTime.Now.Year} Alex LV");
 
         var close = new Button
@@ -909,15 +1164,73 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
 
     private string GetIdleTrayText()
     {
-        return _settings.RemoteUploadEnabled ? $"{AppName} - Remote upload enabled" : AppName;
+        if (!_settings.RemoteUploadEnabled)
+        {
+            return AppName;
+        }
+
+        var active = _settings.GetActiveServer();
+        var text = active is null
+            ? $"{AppName} - Remote upload enabled"
+            : $"{AppName} - Upload to {active.Name}";
+        return text.Length <= 63 ? text : text[..63];
+    }
+
+    private void ToggleRemoteUpload()
+    {
+        _settings.RemoteUploadEnabled = !_settings.RemoteUploadEnabled;
+        _settings.Save();
+        _suppressMenuCloseOnce = true;
+        RefreshIdleTrayIcon();
+        RebuildActiveServerMenu();
+        Log($"remote upload {(_settings.RemoteUploadEnabled ? "enabled" : "disabled")}");
     }
 
     private void UpdateRemoteUploadStatusMenuItem()
     {
         if (_remoteUploadStatusMenuItem is not null)
         {
-            var status = _settings.RemoteUploadEnabled ? "enabled" : "disabled";
-            _remoteUploadStatusMenuItem.Text = $"Remote upload: {status}";
+            _remoteUploadStatusMenuItem.Checked = _settings.RemoteUploadEnabled;
+        }
+    }
+
+    private void RebuildActiveServerMenu()
+    {
+        if (_activeServerMenuItem is null)
+        {
+            return;
+        }
+
+        // Active server can only be changed while remote upload is enabled.
+        _activeServerMenuItem.Enabled = _settings.RemoteUploadEnabled && _settings.RemoteServers.Count > 0;
+
+        _activeServerMenuItem.DropDownItems.Clear();
+
+        if (_settings.RemoteServers.Count == 0)
+        {
+            _activeServerMenuItem.Text = "Active server: (none)";
+            _activeServerMenuItem.DropDownItems.Add(new ToolStripMenuItem("(no servers configured)") { Enabled = false });
+            return;
+        }
+
+        var active = _settings.GetActiveServer();
+        _activeServerMenuItem.Text = $"Active server: {active?.Name ?? "(none)"}";
+
+        foreach (var server in _settings.RemoteServers)
+        {
+            var captured = server;
+            var item = new ToolStripMenuItem(server.Name)
+            {
+                Checked = ReferenceEquals(server, active),
+            };
+            item.Click += (_, _) =>
+            {
+                _settings.ActiveServer = captured.Name;
+                _settings.Save();
+                RefreshIdleTrayIcon();
+                Log($"active server -> {captured.Name}");
+            };
+            _activeServerMenuItem.DropDownItems.Add(item);
         }
     }
 
@@ -1267,21 +1580,27 @@ internal sealed class AppSettings
 
     public bool RemoteUploadEnabled { get; set; }
 
-    // Persisted as a string for forward/backward compatibility. One of:
-    // "Sftp", "Ftp", "FtpsExplicit", "FtpsImplicit".
-    public string Protocol { get; set; } = "Sftp";
+    // Named remote server profiles. The one whose Name matches ActiveServer is used for uploads.
+    public List<RemoteServer> RemoteServers { get; set; } = new();
 
-    public bool PassiveMode { get; set; } = true;
+    // Name of the currently selected server profile.
+    public string ActiveServer { get; set; } = string.Empty;
 
-    public string SshHost { get; set; } = string.Empty;
+    // --- Legacy single-server fields (nullable, read only for one-time migration into RemoteServers).
+    // They are set to null after migration and omitted from the saved file.
+    public string? Protocol { get; set; }
 
-    public int SshPort { get; set; } = 22;
+    public bool? PassiveMode { get; set; }
 
-    public string SshUser { get; set; } = string.Empty;
+    public string? SshHost { get; set; }
 
-    public string SshPasswordBase64 { get; set; } = string.Empty;
+    public int? SshPort { get; set; }
 
-    public string RemoteDirectory { get; set; } = ".";
+    public string? SshUser { get; set; }
+
+    public string? SshPasswordBase64 { get; set; }
+
+    public string? RemoteDirectory { get; set; }
 
     private static string SettingsDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -1306,14 +1625,14 @@ internal sealed class AppSettings
             }
 
             parsed.OutputDirectory = Path.GetFullPath(parsed.OutputDirectory);
-            if (parsed.SshPort <= 0 || parsed.SshPort > 65535)
-            {
-                parsed.SshPort = 22;
-            }
+            parsed.RemoteServers ??= new List<RemoteServer>();
+            parsed.MigrateLegacyServer();
+            parsed.NormalizeServers();
 
-            if (string.IsNullOrWhiteSpace(parsed.RemoteDirectory))
+            if (parsed.RemoteServers.Count > 0 &&
+                !parsed.RemoteServers.Any(s => string.Equals(s.Name, parsed.ActiveServer, StringComparison.Ordinal)))
             {
-                parsed.RemoteDirectory = ".";
+                parsed.ActiveServer = parsed.RemoteServers[0].Name;
             }
 
             return parsed;
@@ -1324,45 +1643,82 @@ internal sealed class AppSettings
         }
     }
 
+    // Fold a pre-1.3 single-server configuration into the RemoteServers list.
+    private void MigrateLegacyServer()
+    {
+        if (RemoteServers.Count == 0 && !string.IsNullOrWhiteSpace(SshHost))
+        {
+            var migrated = new RemoteServer
+            {
+                Name = SshHost!,
+                Protocol = string.IsNullOrWhiteSpace(Protocol) ? "Sftp" : Protocol!,
+                PassiveMode = PassiveMode ?? true,
+                Host = SshHost!,
+                Port = (SshPort is > 0 and <= 65535) ? SshPort.Value : 22,
+                User = SshUser ?? string.Empty,
+                PasswordBase64 = SshPasswordBase64 ?? string.Empty,
+                RemoteDirectory = string.IsNullOrWhiteSpace(RemoteDirectory) ? "." : RemoteDirectory!,
+            };
+            RemoteServers.Add(migrated);
+            if (string.IsNullOrWhiteSpace(ActiveServer))
+            {
+                ActiveServer = migrated.Name;
+            }
+        }
+
+        // Drop legacy fields so they no longer serialize.
+        Protocol = null;
+        PassiveMode = null;
+        SshHost = null;
+        SshPort = null;
+        SshUser = null;
+        SshPasswordBase64 = null;
+        RemoteDirectory = null;
+    }
+
+    private void NormalizeServers()
+    {
+        foreach (var server in RemoteServers)
+        {
+            server.Name ??= string.Empty;
+            if (server.Port <= 0 || server.Port > 65535)
+            {
+                server.Port = 22;
+            }
+
+            if (string.IsNullOrWhiteSpace(server.RemoteDirectory))
+            {
+                server.RemoteDirectory = ".";
+            }
+
+            if (string.IsNullOrWhiteSpace(server.Protocol))
+            {
+                server.Protocol = "Sftp";
+            }
+        }
+    }
+
     internal void Save()
     {
         Directory.CreateDirectory(SettingsDirectory);
-        var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
+        var options = new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        };
+        var json = JsonSerializer.Serialize(this, options);
         File.WriteAllText(SettingsFilePath, json);
     }
 
-    internal string GetSshPassword()
+    internal RemoteServer? GetActiveServer()
     {
-        if (string.IsNullOrWhiteSpace(SshPasswordBase64))
+        if (RemoteServers.Count == 0)
         {
-            return string.Empty;
+            return null;
         }
 
-        try
-        {
-            return Encoding.UTF8.GetString(Convert.FromBase64String(SshPasswordBase64));
-        }
-        catch
-        {
-            return string.Empty;
-        }
-    }
-
-    internal void SetSshPassword(string password)
-    {
-        SshPasswordBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(password));
-    }
-
-    internal RemoteProtocol GetRemoteProtocol()
-    {
-        return Enum.TryParse<RemoteProtocol>(Protocol, ignoreCase: true, out var parsed)
-            ? parsed
-            : RemoteProtocol.Sftp;
-    }
-
-    internal void SetRemoteProtocol(RemoteProtocol protocol)
-    {
-        Protocol = protocol.ToString();
+        return RemoteServers.FirstOrDefault(s => string.Equals(s.Name, ActiveServer, StringComparison.Ordinal))
+            ?? RemoteServers[0];
     }
 
     internal bool TryGetRemoteUploadConfig(out RemoteUploadConfig config, out string error)
@@ -1370,38 +1726,120 @@ internal sealed class AppSettings
         config = default;
         error = string.Empty;
 
-        var password = GetSshPassword();
-        if (string.IsNullOrWhiteSpace(SshHost))
+        var server = GetActiveServer();
+        if (server is null)
         {
-            error = "SSH host is not configured";
+            error = "no remote server is configured";
             return false;
         }
 
-        if (SshPort <= 0 || SshPort > 65535)
+        return server.TryGetConfig(out config, out error);
+    }
+}
+
+internal sealed class RemoteServer
+{
+    public string Name { get; set; } = string.Empty;
+
+    // One of: "Sftp", "Ftp", "FtpsExplicit", "FtpsImplicit".
+    public string Protocol { get; set; } = "Sftp";
+
+    public bool PassiveMode { get; set; } = true;
+
+    public string Host { get; set; } = string.Empty;
+
+    public int Port { get; set; } = 22;
+
+    public string User { get; set; } = string.Empty;
+
+    public string PasswordBase64 { get; set; } = string.Empty;
+
+    public string RemoteDirectory { get; set; } = ".";
+
+    internal string GetPassword()
+    {
+        if (string.IsNullOrWhiteSpace(PasswordBase64))
         {
-            error = "SSH port is invalid";
+            return string.Empty;
+        }
+
+        try
+        {
+            return Encoding.UTF8.GetString(Convert.FromBase64String(PasswordBase64));
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    internal void SetPassword(string password)
+    {
+        PasswordBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(password));
+    }
+
+    internal RemoteProtocol GetProtocol()
+    {
+        return Enum.TryParse<RemoteProtocol>(Protocol, ignoreCase: true, out var parsed)
+            ? parsed
+            : RemoteProtocol.Sftp;
+    }
+
+    internal void SetProtocol(RemoteProtocol protocol)
+    {
+        Protocol = protocol.ToString();
+    }
+
+    internal string DisplayLine()
+    {
+        var protocolLabel = GetProtocol() switch
+        {
+            RemoteProtocol.Sftp => "SFTP",
+            RemoteProtocol.Ftp => "FTP",
+            RemoteProtocol.FtpsExplicit => "FTPS",
+            RemoteProtocol.FtpsImplicit => "FTPS(implicit)",
+            _ => "SFTP",
+        };
+        return $"{Name}  —  {protocolLabel} {User}@{Host}:{Port}";
+    }
+
+    internal bool TryGetConfig(out RemoteUploadConfig config, out string error)
+    {
+        config = default;
+        error = string.Empty;
+
+        var password = GetPassword();
+        if (string.IsNullOrWhiteSpace(Host))
+        {
+            error = $"host is not configured for server '{Name}'";
             return false;
         }
 
-        if (string.IsNullOrWhiteSpace(SshUser))
+        if (Port <= 0 || Port > 65535)
         {
-            error = "SSH user is not configured";
+            error = $"port is invalid for server '{Name}'";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(User))
+        {
+            error = $"user is not configured for server '{Name}'";
             return false;
         }
 
         if (string.IsNullOrWhiteSpace(password))
         {
-            error = "SSH password is not configured";
+            error = $"password is not configured for server '{Name}'";
             return false;
         }
 
         if (string.IsNullOrWhiteSpace(RemoteDirectory))
         {
-            error = "remote directory is not configured";
+            error = $"remote directory is not configured for server '{Name}'";
             return false;
         }
 
-        config = new RemoteUploadConfig(GetRemoteProtocol(), SshHost, SshPort, SshUser, password, RemoteDirectory, PassiveMode);
+        config = new RemoteUploadConfig(GetProtocol(), Host, Port, User, password, RemoteDirectory, PassiveMode);
         return true;
     }
 }

@@ -44,6 +44,8 @@ Launch the EXE. The app runs in the system tray.
 
 Tray menu:
 
+- `Enable Remote Upload` - checkable item; click to turn remote upload on or off (the menu stays open so you can see the checkbox change)
+- `Active server` - pick which server profile uploads use (disabled while remote upload is off)
 - `Open output folder`
 - `Settings`
 - `About`
@@ -56,8 +58,10 @@ Tray menu:
 - Output folder for saved PNG files
 - Toggle `Convert clipboard path to WSL format (/mnt/c/...)`
 - Toggle `Remote upload enabled`
-- Remote credentials dialog for protocol (SFTP / FTP / FTPS explicit / FTPS implicit), host, port, user, password, remote directory, and passive mode
-- Test connection button that verifies login and remote directory access for the selected protocol
+- Manage multiple named remote server profiles (`Remote servers...`): add, edit, remove, and pick which one is active
+- Each profile stores protocol (SFTP / FTP / FTPS explicit / FTPS implicit), host, port, user, password, remote directory, and passive mode
+- Per-profile test connection button that verifies login and remote directory access
+- Switch the active server quickly from the tray menu (`Active server` submenu); uploads use the active profile
 
 Settings are stored at:
 
