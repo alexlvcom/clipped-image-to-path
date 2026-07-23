@@ -4,6 +4,28 @@ ClippedImageToPath is a lightweight Windows tray app that converts copied clipbo
 
 This solves the common issue where Windows Terminal cannot paste bitmap clipboard formats directly into CLI tools.
 
+## Download
+
+Grab the latest **ClippedImageToPath.exe** from the [Releases page](https://github.com/alexlvcom/clipped-image-to-path/releases/latest) — or directly:
+
+**https://github.com/alexlvcom/clipped-image-to-path/releases/latest/download/ClippedImageToPath.exe**
+
+It's a single, self-contained executable — **no .NET runtime install needed**. Just download and double-click; it starts in the system tray.
+
+### First run: Windows SmartScreen
+
+The exe is **unsigned** (no paid code-signing certificate for a free hobby tool), so Windows may show **"Windows protected your PC."** This is *not* a virus warning — it only means the file is new and hasn't built up download reputation yet. Click **More info → Run anyway**. Prefer to be sure? The source is right here — [build it yourself](#build).
+
+### Verify your download (optional)
+
+Each release lists the SHA-256 of the exe. To check the file you downloaded matches:
+
+```powershell
+Get-FileHash .\ClippedImageToPath.exe -Algorithm SHA256
+```
+
+Compare the output against the hash on that version's [release page](https://github.com/alexlvcom/clipped-image-to-path/releases/latest).
+
 ## What It Does
 
 - Watches clipboard updates in the background
