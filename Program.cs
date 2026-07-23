@@ -1628,11 +1628,25 @@ internal sealed class AppSettings
             parsed.RemoteServers ??= new List<RemoteServer>();
             parsed.MigrateLegacyServer();
             parsed.NormalizeServers();
+            var passwordsUpgraded = parsed.UpgradePasswordStorage();
 
             if (parsed.RemoteServers.Count > 0 &&
                 !parsed.RemoteServers.Any(s => string.Equals(s.Name, parsed.ActiveServer, StringComparison.Ordinal)))
             {
                 parsed.ActiveServer = parsed.RemoteServers[0].Name;
+            }
+
+            if (passwordsUpgraded)
+            {
+                // Re-encrypt legacy plaintext-base64 passwords with DPAPI and drop the old field.
+                try
+                {
+                    parsed.Save();
+                }
+                catch
+                {
+                    // Best-effort upgrade; GetPassword still reads the in-memory value this session.
+                }
             }
 
             return parsed;
@@ -1698,6 +1712,22 @@ internal sealed class AppSettings
         }
     }
 
+    // Re-encrypt any legacy plaintext-base64 passwords with DPAPI.
+    // Returns true if any server's stored password representation changed.
+    private bool UpgradePasswordStorage()
+    {
+        var changed = false;
+        foreach (var server in RemoteServers)
+        {
+            if (server.UpgradePasswordStorage())
+            {
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
     internal void Save()
     {
         Directory.CreateDirectory(SettingsDirectory);
@@ -1752,30 +1782,112 @@ internal sealed class RemoteServer
 
     public string User { get; set; } = string.Empty;
 
-    public string PasswordBase64 { get; set; } = string.Empty;
+    // DPAPI-encrypted password (Windows CurrentUser scope), base64-encoded and tagged with a
+    // scheme prefix. Only decryptable by the same Windows user account that saved it.
+    public string Password { get; set; } = string.Empty;
+
+    // Legacy (<= 1.3.3): password stored as plain base64 (encoding, not encryption).
+    // Read for backward compatibility, then migrated into Password and dropped on save.
+    public string? PasswordBase64 { get; set; }
 
     public string RemoteDirectory { get; set; } = ".";
 
+    private const string DpapiScheme = "DPAPI:";
+
     internal string GetPassword()
     {
-        if (string.IsNullOrWhiteSpace(PasswordBase64))
+        if (!string.IsNullOrWhiteSpace(Password))
+        {
+            return DecodeStoredPassword(Password);
+        }
+
+        // Legacy plaintext-base64 fallback (pre-1.3.4 settings not yet migrated).
+        if (!string.IsNullOrWhiteSpace(PasswordBase64))
+        {
+            return DecodeLegacyBase64(PasswordBase64);
+        }
+
+        return string.Empty;
+    }
+
+    internal void SetPassword(string password)
+    {
+        Password = EncodePassword(password);
+        PasswordBase64 = null;
+    }
+
+    // Upgrade a legacy plaintext-base64 password to DPAPI encryption and drop the old field.
+    // Returns true if the stored representation changed (so the caller can persist it).
+    internal bool UpgradePasswordStorage()
+    {
+        if (string.IsNullOrWhiteSpace(Password) && !string.IsNullOrWhiteSpace(PasswordBase64))
+        {
+            Password = EncodePassword(DecodeLegacyBase64(PasswordBase64));
+        }
+
+        if (PasswordBase64 is null)
+        {
+            return false;
+        }
+
+        // Remove the legacy field so plaintext base64 no longer persists to disk.
+        PasswordBase64 = null;
+        return true;
+    }
+
+    private static string EncodePassword(string password)
+    {
+        if (string.IsNullOrEmpty(password))
         {
             return string.Empty;
         }
 
         try
         {
-            return Encoding.UTF8.GetString(Convert.FromBase64String(PasswordBase64));
+            var protectedBytes = ProtectedData.Protect(
+                Encoding.UTF8.GetBytes(password),
+                optionalEntropy: null,
+                DataProtectionScope.CurrentUser);
+            return DpapiScheme + Convert.ToBase64String(protectedBytes);
+        }
+        catch
+        {
+            // DPAPI should always be available on Windows; degrade to base64 if it ever isn't.
+            return Convert.ToBase64String(Encoding.UTF8.GetBytes(password));
+        }
+    }
+
+    private static string DecodeStoredPassword(string stored)
+    {
+        if (stored.StartsWith(DpapiScheme, StringComparison.Ordinal))
+        {
+            try
+            {
+                var blob = Convert.FromBase64String(stored[DpapiScheme.Length..]);
+                var bytes = ProtectedData.Unprotect(blob, optionalEntropy: null, DataProtectionScope.CurrentUser);
+                return Encoding.UTF8.GetString(bytes);
+            }
+            catch
+            {
+                // Wrong Windows user, corrupted blob, or a tampered settings file.
+                return string.Empty;
+            }
+        }
+
+        // Untagged value: treat as legacy plaintext base64.
+        return DecodeLegacyBase64(stored);
+    }
+
+    private static string DecodeLegacyBase64(string base64)
+    {
+        try
+        {
+            return Encoding.UTF8.GetString(Convert.FromBase64String(base64));
         }
         catch
         {
             return string.Empty;
         }
-    }
-
-    internal void SetPassword(string password)
-    {
-        PasswordBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(password));
     }
 
     internal RemoteProtocol GetProtocol()
