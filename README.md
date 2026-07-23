@@ -6,15 +6,14 @@ This solves the common issue where Windows Terminal cannot paste bitmap clipboar
 
 ## Main use case: give coding agents your screenshots
 
-Coding agents (Claude Code, Codex, etc.) can't read an image sitting on your clipboard — they need a **file path or URL**. This app bridges that gap: take a screenshot, and your clipboard instantly becomes a path you can paste straight into the agent's prompt.
+Coding agents work with images by **file path**, not by clipboard bitmap. Some (like Claude Code) can already grab an image off your clipboard when they run right there on your Windows box — but that breaks down the moment the agent isn't local:
 
-The point is that it works **no matter where the agent runs**:
+- **Agent in an SSH terminal on another server.** You literally can't paste an image into that terminal — there's no clipboard there.
+- **Working over Remote Desktop, WinSCP, or any remote session.** The screenshot you take is on your side, not on the machine the agent runs on.
 
-- **Locally on Windows** — paste the Windows path (`"C:\...\clipboard_....png"`).
-- **In WSL** — turn on WSL mode and paste the `/mnt/c/...` path; the agent reads the same file.
-- **On another machine** — your home PC, a remote dev server, a container — turn on **remote upload** (SFTP/FTP/FTPS). The screenshot is uploaded to that server automatically, so the agent there can open it by its remote path or URL.
+That's the gap this fills. Turn on **remote upload** and every screenshot you take automatically lands on the target server (over SFTP/FTP/FTPS). Then you just tell the agent — on the remote dev server, your home PC, wherever it lives — *"check the screenshots at `<the path/folder you configured>`"*, and it can open exactly what you're looking at.
 
-So whatever agent you're coding with, and wherever it lives, you can just hit "screenshot → paste → send" and it can see exactly what you see.
+Locally it's just as handy: the clipboard becomes a ready-to-paste path (`"C:\...\clipboard_....png"`, or a `/mnt/c/...` path in WSL mode) for any agent that can't read clipboard images itself.
 
 ## Screenshots
 
