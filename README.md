@@ -4,6 +4,18 @@ ClippedImageToPath is a lightweight Windows tray app that converts copied clipbo
 
 This solves the common issue where Windows Terminal cannot paste bitmap clipboard formats directly into CLI tools.
 
+## Main use case: give coding agents your screenshots
+
+Coding agents (Claude Code, Codex, etc.) can't read an image sitting on your clipboard — they need a **file path or URL**. This app bridges that gap: take a screenshot, and your clipboard instantly becomes a path you can paste straight into the agent's prompt.
+
+The point is that it works **no matter where the agent runs**:
+
+- **Locally on Windows** — paste the Windows path (`"C:\...\clipboard_....png"`).
+- **In WSL** — turn on WSL mode and paste the `/mnt/c/...` path; the agent reads the same file.
+- **On another machine** — your home PC, a remote dev server, a container — turn on **remote upload** (SFTP/FTP/FTPS). The screenshot is uploaded to that server automatically, so the agent there can open it by its remote path or URL.
+
+So whatever agent you're coding with, and wherever it lives, you can just hit "screenshot → paste → send" and it can see exactly what you see.
+
 ## Download
 
 Grab the latest **ClippedImageToPath.exe** from the [Releases page](https://github.com/alexlvcom/clipped-image-to-path/releases/latest) — or directly:
