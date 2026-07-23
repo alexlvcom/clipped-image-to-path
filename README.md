@@ -16,6 +16,16 @@ The point is that it works **no matter where the agent runs**:
 
 So whatever agent you're coding with, and wherever it lives, you can just hit "screenshot → paste → send" and it can see exactly what you see.
 
+## Screenshots
+
+Lives quietly in the system tray — right-click for the menu:
+
+![Tray menu](ClippedImageToPath-Tray.jpg)
+
+The Settings dialog: output folder, WSL path toggle, and remote upload with named server profiles:
+
+![Settings dialog](ClippedImageToPath-Config.jpg)
+
 ## Download
 
 Grab the latest **ClippedImageToPath.exe** from the [Releases page](https://github.com/alexlvcom/clipped-image-to-path/releases/latest) — or directly:
@@ -100,6 +110,8 @@ Tray menu:
 Settings are stored at:
 
 - `%APPDATA%\\ClippedImageToPath\\settings.json`
+
+Server passwords in that file are **encrypted with Windows DPAPI (per-user scope)** — they can only be decrypted by the same Windows user account on the same machine, not read as plain text. (Configs from older versions that stored passwords as plain base64 are upgraded automatically on first launch.)
 
 ## About Dialog
 
