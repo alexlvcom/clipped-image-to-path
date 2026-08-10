@@ -41,6 +41,8 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
     private const int DeferredRetryIntervalMs = 150;
     private const int DeferredRetryMaxAttempts = 12;
     private const int ClipboardInjectDelayMs = 500;
+    private const int ClipboardRestoreAfterKeyUpMs = 100;
+    private const int ClipboardRestoreSafetyTimeoutMs = 2000;
     private const int SelfInjectIgnoreWindowMs = 3000;
     private static readonly int KeepLatestN = 500;
     private static readonly bool WriteLog = true;
@@ -60,11 +62,18 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
     private readonly Icon _uploadingTrayIcon;
     private readonly System.Windows.Forms.Timer _deferredProcessTimer;
     private readonly System.Windows.Forms.Timer _clipboardInjectTimer;
+    private readonly System.Windows.Forms.Timer _clipboardRestoreTimer;
     private readonly System.Windows.Forms.Timer _uploadStatusTimer;
+    private readonly GlobalPasteMonitor? _pasteMonitor;
     private string? _pendingClipboardText;
     private Bitmap? _pendingClipboardImage;
     private string? _lastInjectedClipboardText;
     private string? _lastInjectedImageSha256;
+    private string? _activeClipboardPath;
+    private Bitmap? _activeClipboardImage;
+    private string? _activeClipboardImageSha256;
+    private uint _activeClipboardSequence;
+    private uint _temporaryPathSequence;
     private ToolStripMenuItem? _remoteUploadStatusMenuItem;
     private ToolStripMenuItem? _activeServerMenuItem;
     private bool _suppressMenuCloseOnce;
@@ -101,6 +110,12 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         };
         _clipboardInjectTimer.Tick += (_, _) => OnClipboardInjectTick();
 
+        _clipboardRestoreTimer = new System.Windows.Forms.Timer
+        {
+            Interval = ClipboardRestoreAfterKeyUpMs,
+        };
+        _clipboardRestoreTimer.Tick += (_, _) => RestoreImageClipboardAfterTerminalPaste();
+
         _uploadStatusTimer = new System.Windows.Forms.Timer
         {
             Interval = 100,
@@ -108,6 +123,15 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         _uploadStatusTimer.Tick += (_, _) => UpdateUploadTrayStatus();
 
         _listenerWindow = new ClipboardListenerWindow(HandleClipboardUpdate);
+        try
+        {
+            _pasteMonitor = new GlobalPasteMonitor(HandlePasteShortcut, HandlePasteShortcutReleased);
+        }
+        catch (Exception ex)
+        {
+            _pasteMonitor = null;
+            Log($"smart paste unavailable: {ex.Message}");
+        }
         Log("started");
     }
 
@@ -127,9 +151,13 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             _deferredProcessTimer.Dispose();
             _clipboardInjectTimer.Stop();
             _clipboardInjectTimer.Dispose();
+            _clipboardRestoreTimer.Stop();
+            _clipboardRestoreTimer.Dispose();
             _uploadStatusTimer.Stop();
             _uploadStatusTimer.Dispose();
+            _pasteMonitor?.Dispose();
             _pendingClipboardImage?.Dispose();
+            _activeClipboardImage?.Dispose();
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();
             _trayIcon.Dispose();
@@ -200,7 +228,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             MaximizeBox = false,
             MinimizeBox = false,
             ShowInTaskbar = false,
-            ClientSize = new Size(620, 245),
+            ClientSize = new Size(620, 277),
         };
 
         var folderLabel = new Label
@@ -249,14 +277,23 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         {
             Text = "Remote upload enabled",
             AutoSize = true,
-            Location = new Point(16, 116),
+            Location = new Point(16, 148),
             Checked = _settings.RemoteUploadEnabled,
+        };
+
+        var smartPasteCheck = new CheckBox
+        {
+            Text = "Paste saved image path with Shift+Insert",
+            AutoSize = true,
+            Location = new Point(16, 116),
+            Checked = _settings.SmartPasteEnabled,
+            Enabled = _pasteMonitor is not null,
         };
 
         var sshButton = new Button
         {
             Text = "Remote servers...",
-            Location = new Point(16, 150),
+            Location = new Point(16, 182),
             Size = new Size(150, 30),
         };
         sshButton.Click += (_, _) => ShowRemoteServersDialog(settingsForm);
@@ -265,7 +302,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         {
             Text = "Save",
             DialogResult = DialogResult.OK,
-            Location = new Point(440, 195),
+            Location = new Point(440, 227),
             Size = new Size(80, 30),
         };
 
@@ -273,7 +310,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         {
             Text = "Cancel",
             DialogResult = DialogResult.Cancel,
-            Location = new Point(525, 195),
+            Location = new Point(525, 227),
             Size = new Size(80, 30),
         };
 
@@ -281,6 +318,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         settingsForm.Controls.Add(folderText);
         settingsForm.Controls.Add(browseButton);
         settingsForm.Controls.Add(wslCheck);
+        settingsForm.Controls.Add(smartPasteCheck);
         settingsForm.Controls.Add(uploadCheck);
         settingsForm.Controls.Add(sshButton);
         settingsForm.Controls.Add(saveButton);
@@ -306,6 +344,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             Directory.CreateDirectory(fullFolder);
             _settings.OutputDirectory = fullFolder;
             _settings.ConvertToWslPath = wslCheck.Checked;
+            _settings.SmartPasteEnabled = smartPasteCheck.Checked;
             _settings.RemoteUploadEnabled = uploadCheck.Checked;
             _settings.Save();
             RefreshIdleTrayIcon();
@@ -1252,6 +1291,12 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         _lastInjectedImageSha256 = ComputeSha256Hex(EncodePng(image));
         _lastInjectedUtc = DateTime.UtcNow;
 
+        _activeClipboardImage?.Dispose();
+        _activeClipboardImage = new Bitmap(image);
+        _activeClipboardPath = text;
+        _activeClipboardImageSha256 = _lastInjectedImageSha256;
+        _activeClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
+
         _pendingClipboardImage?.Dispose();
         _pendingClipboardImage = new Bitmap(image);
         _pendingClipboardText = text;
@@ -1335,6 +1380,12 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
     {
         _clipboardInjectTimer.Stop();
 
+        if (_temporaryPathSequence != 0)
+        {
+            _clipboardInjectTimer.Start();
+            return;
+        }
+
         if (_pendingClipboardImage is null || string.IsNullOrWhiteSpace(_pendingClipboardText))
         {
             return;
@@ -1342,9 +1393,25 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
 
         try
         {
-            if (!TrySetClipboardContent(_pendingClipboardText, _pendingClipboardImage))
+            if (_activeClipboardImage is null)
+            {
+                _activeClipboardImage = new Bitmap(_pendingClipboardImage);
+                _activeClipboardPath = _pendingClipboardText;
+                _activeClipboardImageSha256 = ComputeSha256Hex(EncodePng(_pendingClipboardImage));
+            }
+
+            var activePath = _activeClipboardPath ?? _pendingClipboardText;
+            var clipboardSet = _settings.SmartPasteEnabled && _pasteMonitor is not null
+                ? TrySetClipboardImage(_activeClipboardImage)
+                : TrySetClipboardContent(activePath, _activeClipboardImage);
+            if (!clipboardSet)
             {
                 Log("error IOException: delayed clipboard injection failed");
+                ClearActiveClipboardPayload();
+            }
+            else
+            {
+                _activeClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
             }
         }
         finally
@@ -1353,6 +1420,106 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             _pendingClipboardImage = null;
             _pendingClipboardText = null;
         }
+    }
+
+    private void HandlePasteShortcut()
+    {
+        if (!_settings.SmartPasteEnabled)
+        {
+            return;
+        }
+
+        if (_activeClipboardImage is null || string.IsNullOrWhiteSpace(_activeClipboardPath))
+        {
+            return;
+        }
+
+        var sequence = NativeMethods.GetClipboardSequenceNumber();
+        if (sequence != _activeClipboardSequence && sequence != _temporaryPathSequence && !ClipboardContainsActiveImage())
+        {
+            ClearActiveClipboardPayload();
+            return;
+        }
+
+        if (sequence == _temporaryPathSequence)
+        {
+            return;
+        }
+
+        _lastInjectedClipboardText = _activeClipboardPath;
+        _lastInjectedUtc = DateTime.UtcNow;
+        if (!TrySetClipboardText(_activeClipboardPath))
+        {
+            return;
+        }
+
+        _temporaryPathSequence = NativeMethods.GetClipboardSequenceNumber();
+        _clipboardRestoreTimer.Stop();
+        _clipboardRestoreTimer.Interval = ClipboardRestoreSafetyTimeoutMs;
+        _clipboardRestoreTimer.Start();
+    }
+
+    private void HandlePasteShortcutReleased()
+    {
+        if (_temporaryPathSequence == 0)
+        {
+            return;
+        }
+
+        _clipboardRestoreTimer.Stop();
+        _clipboardRestoreTimer.Interval = ClipboardRestoreAfterKeyUpMs;
+        _clipboardRestoreTimer.Start();
+    }
+
+    private bool ClipboardContainsActiveImage()
+    {
+        if (string.IsNullOrWhiteSpace(_activeClipboardImageSha256))
+        {
+            return false;
+        }
+
+        using var image = TryGetClipboardImage();
+        if (image is null)
+        {
+            return false;
+        }
+
+        var hash = ComputeSha256Hex(EncodePng(image));
+        if (!string.Equals(hash, _activeClipboardImageSha256, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        _activeClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
+        return true;
+    }
+
+    private void RestoreImageClipboardAfterTerminalPaste()
+    {
+        _clipboardRestoreTimer.Stop();
+        if (_activeClipboardImage is null || NativeMethods.GetClipboardSequenceNumber() != _temporaryPathSequence)
+        {
+            return;
+        }
+
+        _lastInjectedImageSha256 = ComputeSha256Hex(EncodePng(_activeClipboardImage));
+        _lastInjectedUtc = DateTime.UtcNow;
+        if (TrySetClipboardImage(_activeClipboardImage))
+        {
+            _activeClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
+            _temporaryPathSequence = 0;
+        }
+    }
+
+    private void ClearActiveClipboardPayload()
+    {
+        _clipboardRestoreTimer.Stop();
+        _activeClipboardImage?.Dispose();
+        _activeClipboardImage = null;
+        _activeClipboardPath = null;
+        _activeClipboardImageSha256 = null;
+        _activeClipboardSequence = 0;
+        _temporaryPathSequence = 0;
     }
 
     private static bool TryClipboardHasText()
@@ -1515,6 +1682,45 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         return false;
     }
 
+    private static bool TrySetClipboardImage(Image image)
+    {
+        for (var i = 0; i < ClipboardRetryCount; i++)
+        {
+            try
+            {
+                var data = new DataObject();
+                using var bmp = new Bitmap(image);
+                data.SetImage(bmp);
+                Clipboard.SetDataObject(data, true);
+                return true;
+            }
+            catch (ExternalException)
+            {
+                Thread.Sleep(ClipboardRetryDelayMs);
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TrySetClipboardText(string text)
+    {
+        for (var i = 0; i < ClipboardRetryCount; i++)
+        {
+            try
+            {
+                Clipboard.SetText(text, TextDataFormat.UnicodeText);
+                return true;
+            }
+            catch (ExternalException)
+            {
+                Thread.Sleep(ClipboardRetryDelayMs);
+            }
+        }
+
+        return false;
+    }
+
     private static void CleanupOldFilesIfNeeded(string outputDirectory)
     {
         if (KeepLatestN <= 0)
@@ -1577,6 +1783,8 @@ internal sealed class AppSettings
         "ClipboardImages");
 
     public bool ConvertToWslPath { get; set; }
+
+    public bool SmartPasteEnabled { get; set; } = true;
 
     public bool RemoteUploadEnabled { get; set; }
 
@@ -2164,6 +2372,86 @@ internal sealed class ClipboardListenerWindow : NativeWindow, IDisposable
     }
 }
 
+internal sealed class GlobalPasteMonitor : IDisposable
+{
+    private readonly NativeMethods.LowLevelKeyboardProc _callback;
+    private readonly Action _onPaste;
+    private readonly Action _onPasteReleased;
+    private IntPtr _hook;
+    private bool _pasteKeyDown;
+
+    internal GlobalPasteMonitor(Action onPaste, Action onPasteReleased)
+    {
+        _onPaste = onPaste;
+        _onPasteReleased = onPasteReleased;
+        _callback = HookCallback;
+        _hook = NativeMethods.SetWindowsHookEx(
+            NativeMethods.WH_KEYBOARD_LL,
+            _callback,
+            NativeMethods.GetModuleHandle(null),
+            0);
+        if (_hook == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("Failed to install the keyboard paste monitor.");
+        }
+    }
+
+    private IntPtr HookCallback(int code, IntPtr wParam, IntPtr lParam)
+    {
+        if (code >= 0)
+        {
+            var message = wParam.ToInt32();
+            var key = Marshal.PtrToStructure<NativeMethods.KbdLlHookStruct>(lParam).VirtualKeyCode;
+            if (message is NativeMethods.WM_KEYUP or NativeMethods.WM_SYSKEYUP)
+            {
+                if (key == NativeMethods.VK_INSERT)
+                {
+                    var wasPasteKeyDown = _pasteKeyDown;
+                    _pasteKeyDown = false;
+                    if (wasPasteKeyDown)
+                    {
+                        try
+                        {
+                            _onPasteReleased();
+                        }
+                        catch
+                        {
+                            // Never let clipboard failures escape through the native hook callback.
+                        }
+                    }
+                }
+            }
+            else if (message is NativeMethods.WM_KEYDOWN or NativeMethods.WM_SYSKEYDOWN)
+            {
+                var isPaste = key == NativeMethods.VK_INSERT && NativeMethods.IsKeyDown(NativeMethods.VK_SHIFT);
+                if (isPaste && !_pasteKeyDown)
+                {
+                    _pasteKeyDown = true;
+                    try
+                    {
+                        _onPaste();
+                    }
+                    catch
+                    {
+                        // Never let clipboard failures escape through the native hook callback.
+                    }
+                }
+            }
+        }
+
+        return NativeMethods.CallNextHookEx(_hook, code, wParam, lParam);
+    }
+
+    public void Dispose()
+    {
+        if (_hook != IntPtr.Zero)
+        {
+            NativeMethods.UnhookWindowsHookEx(_hook);
+            _hook = IntPtr.Zero;
+        }
+    }
+}
+
 internal static class TrayIconFactory
 {
     internal static Icon CreateNormal()
@@ -2238,12 +2526,51 @@ internal static class TrayIconFactory
 internal static class NativeMethods
 {
     internal const int WM_CLIPBOARDUPDATE = 0x031D;
+    internal const int WH_KEYBOARD_LL = 13;
+    internal const int WM_KEYDOWN = 0x0100;
+    internal const int WM_KEYUP = 0x0101;
+    internal const int WM_SYSKEYDOWN = 0x0104;
+    internal const int WM_SYSKEYUP = 0x0105;
+    internal const uint VK_SHIFT = 0x10;
+    internal const uint VK_INSERT = 0x2D;
+
+    internal delegate IntPtr LowLevelKeyboardProc(int code, IntPtr wParam, IntPtr lParam);
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct KbdLlHookStruct
+    {
+        internal uint VirtualKeyCode;
+        internal uint ScanCode;
+        internal uint Flags;
+        internal uint Time;
+        internal UIntPtr ExtraInfo;
+    }
+
+    internal static bool IsKeyDown(uint key) => (GetAsyncKeyState((int)key) & 0x8000) != 0;
 
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern bool AddClipboardFormatListener(IntPtr hwnd);
 
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern bool RemoveClipboardFormatListener(IntPtr hwnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern IntPtr SetWindowsHookEx(int hookId, LowLevelKeyboardProc callback, IntPtr module, uint threadId);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern IntPtr GetModuleHandle(string? moduleName);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern bool UnhookWindowsHookEx(IntPtr hook);
+
+    [DllImport("user32.dll")]
+    internal static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    internal static extern short GetAsyncKeyState(int virtualKey);
+
+    [DllImport("user32.dll")]
+    internal static extern uint GetClipboardSequenceNumber();
 
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern bool DestroyIcon(IntPtr hIcon);

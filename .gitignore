@@ -17,6 +17,7 @@ logs/
 .env
 .env.*
 !.env.example
+.ai-metadata.env
 
 # Dependencies
 node_modules/

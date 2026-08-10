@@ -1,6 +1,6 @@
 # ClippedImageToPath
 
-ClippedImageToPath is a lightweight Windows tray app that converts copied clipboard images into PNG files and replaces the clipboard with the saved file path as text.
+ClippedImageToPath is a lightweight Windows tray app that saves copied clipboard images as PNG files. Smart paste keeps the real image available for normal `Ctrl+V` pastes while `Shift+Insert` pastes the saved file path.
 
 This solves the common issue where Windows Terminal cannot paste bitmap clipboard formats directly into CLI tools.
 
@@ -53,7 +53,8 @@ Compare the output against the hash on that version's [release page](https://git
 - Detects image content (screenshots, snips, browser images, etc.)
 - Saves image as PNG with timestamp name:
   - `clipboard_yyyy-MM-dd_HH-mm-ss_fff.png`
-- Replaces clipboard with quoted path text
+- Keeps the image on the clipboard for Teams, Gmail, and other GUI apps
+- On `Shift+Insert`, temporarily supplies the quoted path text
   - Windows mode: `"C:\\...\\clipboard_....png"`
   - Optional WSL mode: `"/mnt/c/.../clipboard_....png"`
 - Optional upload to a remote server after the PNG is saved, over SFTP (SSH), FTP, or FTPS (explicit/implicit TLS)
@@ -74,7 +75,7 @@ dotnet build -c Release
 ## Publish (single-file)
 
 ```powershell
-dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true
+dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
 ```
 
 Published executable:
@@ -100,6 +101,7 @@ Tray menu:
 
 - Output folder for saved PNG files
 - Toggle `Convert clipboard path to WSL format (/mnt/c/...)`
+- Toggle path paste with `Shift+Insert`
 - Toggle `Remote upload enabled`
 - Manage multiple named remote server profiles (`Remote servers...`): add, edit, remove, and pick which one is active
 - Each profile stores protocol (SFTP / FTP / FTPS explicit / FTPS implicit), host, port, user, password, remote directory, and passive mode
@@ -132,18 +134,17 @@ A runtime log is written to:
 
 1. Copy image (Snipping Tool, browser, screenshot).
 2. App saves PNG file.
-3. Clipboard becomes quoted file path text.
-4. Paste into Windows Terminal / CLI tool.
+3. Use `Ctrl+V` to paste the real image into GUI apps, or `Shift+Insert` to paste the quoted path into a terminal.
 
 ## Notes
 
 - Works standalone; no clipboard manager is required.
 - Clipboard managers (for example, Ditto) are optional and can be used alongside this app.
 - If output path has spaces, quoted clipboard text prevents CLI parsing issues.
-- In clipboard managers, you may see two entries for one screenshot:
+- In clipboard managers, you may see extra entries for one screenshot or terminal paste:
   - the original image clip from your screenshot tool
-  - the path-injection clip written by ClippedImageToPath
-- This is expected because the app performs a second clipboard write so Terminal can paste the file path.
+  - the temporary path clip written by ClippedImageToPath for a terminal paste
+- `Shift+Insert` always requests the saved path, so it also works in terminals hosted inside editors and other applications.
 - If you want to hide the app-generated entry, add `ClippedImageToPath.exe` to your clipboard manager's ignore-app list.
 
 ## Troubleshooting
