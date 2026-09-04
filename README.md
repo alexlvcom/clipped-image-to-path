@@ -23,7 +23,7 @@ Lives quietly in the system tray — right-click for the menu:
 
 The Settings dialog: output folder, WSL path toggle, and remote upload with named server profiles:
 
-![Settings dialog](ClippedImageToPath-Config.jpg)
+![Settings dialog](ClippedImageToPath-Config.png)
 
 ## Download
 
@@ -58,7 +58,7 @@ Compare the output against the hash on that version's [release page](https://git
   - Windows mode: `"C:\\...\\clipboard_....png"`
   - Optional WSL mode: `"/mnt/c/.../clipboard_....png"`
 - Optional upload to a remote server after the PNG is saved, over SFTP (SSH), FTP, or FTPS (explicit/implicit TLS)
-- A brief Windows reminder every 30 minutes while remote upload is enabled
+- Optional Windows reminders while remote upload is enabled, with a configurable interval (30 minutes by default)
 - Leaves normal text clipboard entries unchanged
 - Includes loop-prevention, debounce, retry logic, and dedupe hashing
 
@@ -100,10 +100,12 @@ Tray menu:
 
 `Settings` dialog allows:
 
+- Hover over any option to see a short description of what it does
 - Output folder for saved PNG files
 - Toggle `Convert clipboard path to WSL format (/mnt/c/...)`
 - Toggle path paste with `Shift+Insert`
 - Toggle `Remote upload enabled`
+- Toggle remote upload notifications and choose their interval in minutes (30 by default)
 - Manage multiple named remote server profiles (`Remote servers...`): add, edit, remove, and pick which one is active
 - Each profile stores protocol (SFTP / FTP / FTPS explicit / FTPS implicit), host, port, user, password, remote directory, and passive mode
 - Per-profile test connection button that verifies login and remote directory access

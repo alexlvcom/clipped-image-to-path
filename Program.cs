@@ -44,7 +44,6 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
     private const int ClipboardRestoreAfterKeyUpMs = 100;
     private const int ClipboardRestoreSafetyTimeoutMs = 2000;
     private const int SelfInjectIgnoreWindowMs = 3000;
-    private const int RemoteUploadReminderIntervalMs = 30 * 60 * 1000;
     private static readonly int KeepLatestN = 500;
     private static readonly bool WriteLog = true;
 
@@ -126,7 +125,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
 
         _remoteUploadReminderTimer = new System.Windows.Forms.Timer
         {
-            Interval = RemoteUploadReminderIntervalMs,
+            Interval = GetRemoteUploadReminderIntervalMs(),
         };
         _remoteUploadReminderTimer.Tick += (_, _) => ShowRemoteUploadReminder();
         UpdateRemoteUploadReminderTimer();
@@ -239,7 +238,15 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             MaximizeBox = false,
             MinimizeBox = false,
             ShowInTaskbar = false,
-            ClientSize = new Size(620, 277),
+            ClientSize = new Size(620, 315),
+        };
+
+        using var settingsToolTip = new ToolTip
+        {
+            InitialDelay = 400,
+            ReshowDelay = 100,
+            AutoPopDelay = 10000,
+            ShowAlways = true,
         };
 
         var folderLabel = new Label
@@ -301,10 +308,46 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             Enabled = _pasteMonitor is not null,
         };
 
+        var uploadReminderCheck = new CheckBox
+        {
+            Text = "Show remote upload notification every",
+            AutoSize = true,
+            Location = new Point(16, 180),
+            Checked = _settings.RemoteUploadReminderEnabled,
+        };
+
+        var uploadReminderMinutes = new NumericUpDown
+        {
+            Location = new Point(260, 177),
+            Size = new Size(70, 26),
+            Minimum = AppSettings.MinRemoteUploadReminderMinutes,
+            Maximum = AppSettings.MaxRemoteUploadReminderMinutes,
+            Value = _settings.RemoteUploadReminderMinutes,
+            TextAlign = HorizontalAlignment.Right,
+        };
+
+        var uploadReminderMinutesLabel = new Label
+        {
+            Text = "minutes",
+            AutoSize = true,
+            Location = new Point(337, 181),
+        };
+
+        void UpdateUploadReminderControls()
+        {
+            uploadReminderCheck.Enabled = uploadCheck.Checked;
+            uploadReminderMinutes.Enabled = uploadCheck.Checked && uploadReminderCheck.Checked;
+            uploadReminderMinutesLabel.Enabled = uploadReminderMinutes.Enabled;
+        }
+
+        uploadCheck.CheckedChanged += (_, _) => UpdateUploadReminderControls();
+        uploadReminderCheck.CheckedChanged += (_, _) => UpdateUploadReminderControls();
+        UpdateUploadReminderControls();
+
         var sshButton = new Button
         {
             Text = "Remote servers...",
-            Location = new Point(16, 182),
+            Location = new Point(16, 216),
             Size = new Size(150, 30),
         };
         sshButton.Click += (_, _) => ShowRemoteServersDialog(settingsForm);
@@ -313,7 +356,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         {
             Text = "Save",
             DialogResult = DialogResult.OK,
-            Location = new Point(440, 227),
+            Location = new Point(440, 265),
             Size = new Size(80, 30),
         };
 
@@ -321,9 +364,23 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         {
             Text = "Cancel",
             DialogResult = DialogResult.Cancel,
-            Location = new Point(525, 227),
+            Location = new Point(525, 265),
             Size = new Size(80, 30),
         };
+
+        const string outputFolderHelp = "Folder where copied clipboard images are saved as PNG files.";
+        settingsToolTip.SetToolTip(folderLabel, outputFolderHelp);
+        settingsToolTip.SetToolTip(folderText, outputFolderHelp);
+        settingsToolTip.SetToolTip(browseButton, "Choose the folder where copied clipboard images are saved.");
+        settingsToolTip.SetToolTip(wslCheck, "Copy saved paths in /mnt/... format for use in WSL terminals.");
+        settingsToolTip.SetToolTip(smartPasteCheck, "Keep screenshots available for normal Ctrl+V, and paste the saved file path with Shift+Insert.");
+        settingsToolTip.SetToolTip(uploadCheck, "Upload each saved clipboard image to the selected remote server when enabled.");
+        settingsToolTip.SetToolTip(uploadReminderCheck, "Remind you that remote upload is still on so you can disable it when no longer needed.");
+        settingsToolTip.SetToolTip(uploadReminderMinutes, "Choose how often the remote upload notification appears, from 1 to 1,440 minutes.");
+        settingsToolTip.SetToolTip(uploadReminderMinutesLabel, "Choose how often the remote upload notification appears, from 1 to 1,440 minutes.");
+        settingsToolTip.SetToolTip(sshButton, "Add, edit, remove, select, and test remote server profiles.");
+        settingsToolTip.SetToolTip(saveButton, "Save these settings and apply them immediately.");
+        settingsToolTip.SetToolTip(cancelButton, "Close without saving changes.");
 
         settingsForm.Controls.Add(folderLabel);
         settingsForm.Controls.Add(folderText);
@@ -331,6 +388,9 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         settingsForm.Controls.Add(wslCheck);
         settingsForm.Controls.Add(smartPasteCheck);
         settingsForm.Controls.Add(uploadCheck);
+        settingsForm.Controls.Add(uploadReminderCheck);
+        settingsForm.Controls.Add(uploadReminderMinutes);
+        settingsForm.Controls.Add(uploadReminderMinutesLabel);
         settingsForm.Controls.Add(sshButton);
         settingsForm.Controls.Add(saveButton);
         settingsForm.Controls.Add(cancelButton);
@@ -357,6 +417,8 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             _settings.ConvertToWslPath = wslCheck.Checked;
             _settings.SmartPasteEnabled = smartPasteCheck.Checked;
             _settings.RemoteUploadEnabled = uploadCheck.Checked;
+            _settings.RemoteUploadReminderEnabled = uploadReminderCheck.Checked;
+            _settings.RemoteUploadReminderMinutes = Decimal.ToInt32(uploadReminderMinutes.Value);
             _settings.Save();
             RefreshIdleTrayIcon();
             Log("settings updated");
@@ -886,7 +948,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
 
         AddAboutRow(details, 0, "Version", version);
         AddAboutRow(details, 1, "Build date", File.GetLastWriteTime(Application.ExecutablePath).ToString("yyyy-MM-dd HH:mm:ss"));
-        AddAboutRow(details, 2, "Build summary", "30-minute reminders while remote upload is enabled.");
+        AddAboutRow(details, 2, "Build summary", "Clear, configurable remote upload reminders and Settings help.");
         AddAboutRow(details, 3, "Copyright", $"(c) {DateTime.Now.Year} Alex LV");
 
         var close = new Button
@@ -1239,22 +1301,33 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
 
     private void UpdateRemoteUploadReminderTimer()
     {
-        if (_settings.RemoteUploadEnabled)
-        {
-            if (!_remoteUploadReminderTimer.Enabled)
-            {
-                _remoteUploadReminderTimer.Start();
-            }
-        }
-        else
+        if (!_settings.RemoteUploadEnabled || !_settings.RemoteUploadReminderEnabled)
         {
             _remoteUploadReminderTimer.Stop();
+            return;
         }
+
+        var interval = GetRemoteUploadReminderIntervalMs();
+        if (_remoteUploadReminderTimer.Interval != interval)
+        {
+            _remoteUploadReminderTimer.Stop();
+            _remoteUploadReminderTimer.Interval = interval;
+        }
+
+        if (!_remoteUploadReminderTimer.Enabled)
+        {
+            _remoteUploadReminderTimer.Start();
+        }
+    }
+
+    private int GetRemoteUploadReminderIntervalMs()
+    {
+        return _settings.RemoteUploadReminderMinutes * 60 * 1000;
     }
 
     private void ShowRemoteUploadReminder()
     {
-        if (!_settings.RemoteUploadEnabled)
+        if (!_settings.RemoteUploadEnabled || !_settings.RemoteUploadReminderEnabled)
         {
             _remoteUploadReminderTimer.Stop();
             return;
@@ -1262,8 +1335,8 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
 
         _notifyIcon.ShowBalloonTip(
             5000,
-            AppName,
-            "Remote upload is enabled.",
+            "Remote upload reminder",
+            "Remote upload is still enabled. Disable it when you no longer need it.",
             ToolTipIcon.Info);
     }
 
@@ -1820,6 +1893,10 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
 
 internal sealed class AppSettings
 {
+    internal const int DefaultRemoteUploadReminderMinutes = 30;
+    internal const int MinRemoteUploadReminderMinutes = 1;
+    internal const int MaxRemoteUploadReminderMinutes = 24 * 60;
+
     public string OutputDirectory { get; set; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.MyPictures),
         "ClipboardImages");
@@ -1829,6 +1906,10 @@ internal sealed class AppSettings
     public bool SmartPasteEnabled { get; set; } = true;
 
     public bool RemoteUploadEnabled { get; set; }
+
+    public bool RemoteUploadReminderEnabled { get; set; } = true;
+
+    public int RemoteUploadReminderMinutes { get; set; } = DefaultRemoteUploadReminderMinutes;
 
     // Named remote server profiles. The one whose Name matches ActiveServer is used for uploads.
     public List<RemoteServer> RemoteServers { get; set; } = new();
@@ -1876,6 +1957,7 @@ internal sealed class AppSettings
 
             parsed.OutputDirectory = Path.GetFullPath(parsed.OutputDirectory);
             parsed.RemoteServers ??= new List<RemoteServer>();
+            parsed.NormalizeRemoteUploadReminder();
             parsed.MigrateLegacyServer();
             parsed.NormalizeServers();
             var passwordsUpgraded = parsed.UpgradePasswordStorage();
@@ -1904,6 +1986,15 @@ internal sealed class AppSettings
         catch
         {
             return new AppSettings();
+        }
+    }
+
+    private void NormalizeRemoteUploadReminder()
+    {
+        if (RemoteUploadReminderMinutes < MinRemoteUploadReminderMinutes ||
+            RemoteUploadReminderMinutes > MaxRemoteUploadReminderMinutes)
+        {
+            RemoteUploadReminderMinutes = DefaultRemoteUploadReminderMinutes;
         }
     }
 

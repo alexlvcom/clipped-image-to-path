@@ -8,10 +8,10 @@
     <AssemblyName>ClippedImageToPath</AssemblyName>
     <RootNamespace>ClippedImageToPath</RootNamespace>
     <Product>ClippedImageToPath</Product>
-    <Version>1.5.0</Version>
-    <FileVersion>1.5.0.0</FileVersion>
-    <AssemblyVersion>1.5.0.0</AssemblyVersion>
-    <InformationalVersion>1.5.0</InformationalVersion>
+    <Version>1.6.0</Version>
+    <FileVersion>1.6.0.0</FileVersion>
+    <AssemblyVersion>1.6.0.0</AssemblyVersion>
+    <InformationalVersion>1.6.0</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
   <ItemGroup>

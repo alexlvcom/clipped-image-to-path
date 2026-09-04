@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.6.0 - 2026-09-04
+
+- Add settings to turn remote upload notifications on or off and choose their interval in minutes.
+- Keep notifications enabled at a 30-minute interval by default.
+- Disable notification controls while remote upload is turned off.
+- Describe every Settings option with a tooltip when the pointer hovers over it.
+- Explain that remote upload notifications are reminders to disable uploading when it is no longer needed.
+- Describe remote uploads without implying that source images must already be PNG files.
+
 ## 1.5.0 - 2026-09-04
 
 - Show a brief Windows notification every 30 minutes while remote upload is enabled.
