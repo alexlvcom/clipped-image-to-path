@@ -58,6 +58,7 @@ Compare the output against the hash on that version's [release page](https://git
   - Windows mode: `"C:\\...\\clipboard_....png"`
   - Optional WSL mode: `"/mnt/c/.../clipboard_....png"`
 - Optional upload to a remote server after the PNG is saved, over SFTP (SSH), FTP, or FTPS (explicit/implicit TLS)
+- A brief Windows reminder every 30 minutes while remote upload is enabled
 - Leaves normal text clipboard entries unchanged
 - Includes loop-prevention, debounce, retry logic, and dedupe hashing
 

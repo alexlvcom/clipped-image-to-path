@@ -44,6 +44,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
     private const int ClipboardRestoreAfterKeyUpMs = 100;
     private const int ClipboardRestoreSafetyTimeoutMs = 2000;
     private const int SelfInjectIgnoreWindowMs = 3000;
+    private const int RemoteUploadReminderIntervalMs = 30 * 60 * 1000;
     private static readonly int KeepLatestN = 500;
     private static readonly bool WriteLog = true;
 
@@ -64,6 +65,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
     private readonly System.Windows.Forms.Timer _clipboardInjectTimer;
     private readonly System.Windows.Forms.Timer _clipboardRestoreTimer;
     private readonly System.Windows.Forms.Timer _uploadStatusTimer;
+    private readonly System.Windows.Forms.Timer _remoteUploadReminderTimer;
     private readonly GlobalPasteMonitor? _pasteMonitor;
     private string? _pendingClipboardText;
     private Bitmap? _pendingClipboardImage;
@@ -122,6 +124,13 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         };
         _uploadStatusTimer.Tick += (_, _) => UpdateUploadTrayStatus();
 
+        _remoteUploadReminderTimer = new System.Windows.Forms.Timer
+        {
+            Interval = RemoteUploadReminderIntervalMs,
+        };
+        _remoteUploadReminderTimer.Tick += (_, _) => ShowRemoteUploadReminder();
+        UpdateRemoteUploadReminderTimer();
+
         _listenerWindow = new ClipboardListenerWindow(HandleClipboardUpdate);
         try
         {
@@ -155,6 +164,8 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
             _clipboardRestoreTimer.Dispose();
             _uploadStatusTimer.Stop();
             _uploadStatusTimer.Dispose();
+            _remoteUploadReminderTimer.Stop();
+            _remoteUploadReminderTimer.Dispose();
             _pasteMonitor?.Dispose();
             _pendingClipboardImage?.Dispose();
             _activeClipboardImage?.Dispose();
@@ -875,7 +886,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
 
         AddAboutRow(details, 0, "Version", version);
         AddAboutRow(details, 1, "Build date", File.GetLastWriteTime(Application.ExecutablePath).ToString("yyyy-MM-dd HH:mm:ss"));
-        AddAboutRow(details, 2, "Build summary", "Tray 'Enable Remote Upload' checkbox toggle that keeps the menu open.");
+        AddAboutRow(details, 2, "Build summary", "30-minute reminders while remote upload is enabled.");
         AddAboutRow(details, 3, "Copyright", $"(c) {DateTime.Now.Year} Alex LV");
 
         var close = new Button
@@ -1194,6 +1205,7 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
     private void RefreshIdleTrayIcon()
     {
         UpdateRemoteUploadStatusMenuItem();
+        UpdateRemoteUploadReminderTimer();
         if (_activeUploadCount == 0)
         {
             _notifyIcon.Icon = GetIdleTrayIcon();
@@ -1223,6 +1235,36 @@ internal sealed class ClipboardBridgeContext : ApplicationContext
         RefreshIdleTrayIcon();
         RebuildActiveServerMenu();
         Log($"remote upload {(_settings.RemoteUploadEnabled ? "enabled" : "disabled")}");
+    }
+
+    private void UpdateRemoteUploadReminderTimer()
+    {
+        if (_settings.RemoteUploadEnabled)
+        {
+            if (!_remoteUploadReminderTimer.Enabled)
+            {
+                _remoteUploadReminderTimer.Start();
+            }
+        }
+        else
+        {
+            _remoteUploadReminderTimer.Stop();
+        }
+    }
+
+    private void ShowRemoteUploadReminder()
+    {
+        if (!_settings.RemoteUploadEnabled)
+        {
+            _remoteUploadReminderTimer.Stop();
+            return;
+        }
+
+        _notifyIcon.ShowBalloonTip(
+            5000,
+            AppName,
+            "Remote upload is enabled.",
+            ToolTipIcon.Info);
     }
 
     private void UpdateRemoteUploadStatusMenuItem()

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.5.0 - 2026-09-04
+
+- Show a brief Windows notification every 30 minutes while remote upload is enabled.
+
 ## 1.4.0 - 2026-08-10
 
 - Keep copied screenshots as real image clipboard content for normal `Ctrl+V` pastes in Teams, Gmail, and other GUI applications.
